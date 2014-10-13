@@ -1,0 +1,23 @@
+As this release is ALPHA, not everything is supported. Because of this, this
+document will show you the commands and modes that are supported in this
+version.
+
+USER COMMANDS: USER NICK QUIT VERSION PING PONG ADMIN PRIVMSG INFO TIME WHOIS NOTICE JOIN
+               PART MODE TOPIC WHO MOTD RULES OPER LUSERS NAMES KICK LIST STATS
+
+OPER COMMANDS: REHASH KILL DIE WALLOPS RESTART*
+
+CHANNEL MODES: i,m,n,t,k,l,p,s,o,h**,v
+
+USER MODES: i,w,s,o
+
+
+* WARNING: In this Alpha, RESTART will not work, it will perform the same as /DIE until implemented.
+
+** CHANNEL MODE h will be optional, and eventually be part of ./configure
+
+The following features are supported:
+
+* Dynamic module support
+* Object orientated architecture to save memory and increase speed
+* Connection multiplexing, one process for all (no forking!)

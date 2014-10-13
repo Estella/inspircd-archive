@@ -1,0 +1,10 @@
+1.0 alpha 3
+
+* Fixed problem where nicks containing control codes were allowed
+* Added support so that ircd honours channel mode +n
+* Added support so that ircd honours channel mode +t
+* Fixed linefeeds in middle of line bug (reported by Craig)
+* Fixed buffer overflow in channel names (reported by Allan)
+* Fixed close() on nonblocking sockets problem
+* Added /KILL command >:)
+* Added /KICK command
