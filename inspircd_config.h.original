@@ -1,0 +1,11 @@
+#define CONFIG_FILE "/home/brain/inspircd/inspircd.conf"
+#define SYSLOG_FACILITY LOG_DAEMON
+#define SYSLOG_LEVEL LOG_NOTICE
+#define MAXCLIENTS 64 /* max number of connections */
+#define NICKMAX 32 /* max length of nicknames */
+#define CHANMAX 64 /* max length of channel names */
+#define MAXCHANS 20 /* max number of channels a user can be on at once */
+#define VERSION "InspIRCd-1.0[Alpha0]"
+#define MAXCHAN 10000 /* total max channels */
+#define MAXMODES 256 /* max length of stored channel mode string */
+
