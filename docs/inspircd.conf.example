@@ -1,0 +1,145 @@
+################################################
+#
+# This is the Example config file for InspIRCd
+# Written By Craig 'FrostyCoolSlug' McLure
+#
+# Note: This is the total config for this Alpha,
+#       And is by no means complete. More will
+#       Come in later versions.
+#
+# Also: There is currently no form of validation
+#       Therefore, if there is a missing " the IRCd
+#       may indeed break.
+################################################
+
+
+# General server description (REQUIRED)
+#
+# Example:
+<server name="irc.inspircd.org"
+        description="The InspIRCd Project."
+        network="InspIRCd"
+>
+# Parameters:
+#  name: The name of your server.
+#  description: The Server Description, as appearing in a /whois
+#  network: The IRC Network Name.
+
+
+
+# Port and address bindings. (REQUIRED)
+# You may use more than one of these tags.
+#
+# Example:
+<bind address="64.246.28.99" port="5100">
+# Parameters:
+#  address: The Address the Socket is binding to.
+#  Port: The Port which will be opened.
+
+
+
+# Administrative Information
+#
+# Example:
+<admin  name="Craig McLure"
+        nick="FrostyCoolSlug"
+        email="Craig@inspircd.org"
+>
+# Parameters:
+# name: The Real / Prefered Admin Name
+# nick: The Administrators NickName
+# email: The Administrators Email Address.
+
+
+
+# Other Needed Files
+#
+# Example:
+<files  motd="/home/brain/inspircd/inspire.motd"
+        rules="/home/brain/inspircd/inspire.rules"
+>
+# Parameters:
+# motd: Location of the Message of the Day.
+# rules: Location of the Rules File.
+
+
+
+# Options Block.
+#
+# Example:
+<options prefixquit="Quit"
+         allowhalfop="yes"
+         allowprotect="yes"
+         allowfounder="yes"
+>
+# Parameters:
+# prefixquit: Create a Prefix on Quit Messages
+# allowhalfop: CURRENTLY NOT IMPLEMENTED.
+# allowprotect: CURRENTLY NOT IMPLEMENTED.
+# allowfounder: CURRENTLY NOT IMPLEMENTED.
+
+
+############################# CLASS NAMES ##############################
+#
+# A class is a group of commands, which are grouped together and given
+# a class name. These can be used to define oper types using the <type>
+# tag.
+#
+########################################################################
+# Some Defaults:
+
+<class name="Shutdown" commands="DIE RESTART REHASH">
+<class name="ServerLink" commands="CONNECT SQUIT">
+<class name="UserControl" commands="KILL GLINE KLINE ZLINE QLINE SHUN">
+<class name="OperChat" commands="WALLOPS CHATOPS">
+<class name="HostCloak" commands="SETHOST SETIDENT SETNAME">
+
+
+########################################################################
+#
+# A type is a group of classes that define an oper type for use in an
+# <oper> tag.
+#
+########################################################################
+# Some Defaults:
+<type name="NetAdmin" classes="ServerLink UserControl OperChat HostCloak Shutdown" host="N$
+<type name="GlobalOp" classes="ServerLink OperChat UserControl HostCloak" host="IRCop.chat$
+<type name="LocalOp" classes="OperChat UserControl HostCloak" host="LocalOp.chatspike.net">
+<type name="Helper" classes="HostCloak" host="helper.chatspike.net">
+
+########################################################################
+#
+# Opers are defined here. Each oper can contain one or more hostmasks
+# seperated by spaces, and one type as defined from a set of user
+# defined classes.
+#
+########################################################################
+# Example:
+<oper   name="FrostyCoolSlug"
+        password="secretpass"
+        host="*@127.0.0.1" "*@111.11.11.11"
+        type="NetAdmin"
+>
+# Parameters:
+#  name: Oper Login
+#  password: Opers Password
+#  host: Opers Login host
+#  type: Oper type (relevant to <type>)
+
+
+##################### allow/deny for connects (replaces I:Lines) #######
+#
+# This example allows connections from 50.12.* but only if they provide
+# the password blahblah, denies connections from 69.254.*, and allows
+# all other connections.
+#
+########################################################################
+# Examples:
+<connect allow="50.12.*"  password="blahblah">
+<connect deny="69.254.*">
+<connect allow="*">
+# Parameters:
+# allow: Hosts to allow connections from
+# password: Specify a password for connections with these classes
+# deny: Disallow hosts from these addresses.
+
