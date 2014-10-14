@@ -117,7 +117,7 @@
 # Example:
 <oper   name="FrostyCoolSlug"
         password="secretpass"
-        host="*@127.0.0.1" "*@111.11.11.11"
+        host="*@127.0.0.1 *@111.11.11.11"
         type="NetAdmin"
 >
 # Parameters:

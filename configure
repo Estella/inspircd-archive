@@ -18,6 +18,7 @@ ME=`pwd`
 ###############################################################################
 
 TEST=`pwd`
+TEST=$TEST/conf
 echo "" 
 echo "Where do you want to place your configuration files? ($TEST)" 
 read cc 

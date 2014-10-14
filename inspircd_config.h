@@ -2,7 +2,7 @@
 
 #define SYSLOG_FACILITY LOG_DAEMON
 #define SYSLOG_LEVEL LOG_NOTICE
-#define CONFIG_FILE "/home/brain/inspircd/inspircd.conf"
+#define CONFIG_FILE "/home/brain/inspircd/conf/inspircd.conf"
 #define MOD_PATH "/home/brain/inspircd/modules"
 #define VERSION "InspIRCd-1.0[Alpha1]"
 #define MAXCLIENTS 64

@@ -49,12 +49,12 @@ int DaemonSeed (void)
   else if (childpid > 0)
     exit (0);
   setsid ();
-  chdir ("/");
+  /*chdir ("/");*/
   umask (077);
-  /* close stdout, stdin, stderr */
+  /* close stdout, stdin, stderr
   close(0);
   close(1);
-  close(2);
+  close(2);*/
   return (TRUE);
 }
 
