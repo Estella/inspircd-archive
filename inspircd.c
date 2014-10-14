@@ -53,7 +53,7 @@ typedef void (handlerfunc) (char**, int, struct userrec*);
 struct command_t {
 	char command[MAXBUF]; /* command name */
 	handlerfunc *handler_function; /* handler function as in typedef */
-	long flags_needed; /* user flags needed to execute the command or 0 */
+	char flags_needed; /* user flags needed to execute the command or 0 */
 	int min_params; /* minimum number of parameters command takes */
 };
 
@@ -260,6 +260,27 @@ void WriteCommonExcept(struct userrec *u, char* text, ...)
 	}
 }
 
+void WriteOpers(char* text, ...)
+{
+	int i = 0;
+	char textbuffer[MAXBUF];
+	va_list argsPtr;
+	va_start (argsPtr, text);
+	vsnprintf(textbuffer, MAXBUF, text, argsPtr);
+	va_end(argsPtr);
+
+
+	for (i = 0; i <= MAXCLIENTS; i++)
+	{
+		if ((clientlist[i].fd) && (strstr(clientlist[i].modes,"o")))
+		{
+			WriteServ(clientlist[i].fd,"NOTICE :%s",textbuffer);
+		}
+	}
+}
+
+
+
 /* convert a string to lowercase. Note following special circumstances
  * taken from RFC 1459. Many "official" server branches still hold to this
  * rule so i will too;
@@ -294,9 +315,9 @@ void strlower(char *n)
 int isnick(char *n)
 {
 	int i = 0;
-	if (strlen(n) > NICKMAX)
+	if (strlen(n) > NICKMAX-1)
 	{
-		n[NICKMAX] = '\0';
+		n[NICKMAX-1] = '\0';
 	}
 	for (i = 0; i <= strlen(n)-1; i++)
 	{
@@ -388,6 +409,57 @@ char* cmode(struct userrec *user, struct chanrec *chan)
 	}
 }
 
+char scratch[MAXMODES];
+
+char* chanmodes(struct chanrec *chan)
+{
+	strcpy(scratch,"");
+	if (chan->noexternal)
+	{
+		strcat(scratch,"n");
+	}
+	if (chan->topiclock)
+	{
+		strcat(scratch,"t");
+	}
+	if (strcmp(chan->key,""))
+	{
+		strcat(scratch,"k");
+	}
+	if (chan->limit)
+	{
+		strcat(scratch,"l");
+	}
+	if (chan->inviteonly)
+	{
+		strcat(scratch,"i");
+	}
+	if (chan->moderated)
+	{
+		strcat(scratch,"m");
+	}
+	if (chan->secret)
+	{
+		strcat(scratch,"s");
+	}
+	if (chan->c_private)
+	{
+		strcat(scratch,"p");
+	}
+	if (strcmp(chan->key,""))
+	{
+		strcat(scratch," ");
+		strcat(scratch,chan->key);
+	}
+	if (chan->limit)
+	{
+		char foo[24];
+		sprintf(foo," %d",chan->limit);
+		strcat(scratch,foo);
+	}
+	return scratch;
+}
+
 /* returns the status value for a given user on a channel, e.g. STATUS_OP for
  * op, STATUS_VOICE for voice etc. If the user has several modes set, the
  * highest mode the user has must be returned. */
@@ -464,7 +536,7 @@ int usercount(struct chanrec *c)
 /* add a channel to a user, creating the record for it if needed and linking
  * it to the user record */
 
-struct chanrec* add_channel(struct userrec *user, char* cname)
+struct chanrec* add_channel(struct userrec *user, char* cname, char* key)
 {
 	int i = 0;
 	struct chanrec* Ptr;
@@ -474,9 +546,9 @@ struct chanrec* add_channel(struct userrec *user, char* cname)
 	{
 		return NULL;
 	}
-	if (strlen(cname) > CHANMAX)
+	if (strlen(cname) > CHANMAX-1)
 	{
-		cname[CHANMAX] = '\0';
+		cname[CHANMAX-1] = '\0';
 	}
 
 	if ((has_channel(user,FindChan(cname))) && (FindChan(cname)))
@@ -492,10 +564,11 @@ struct chanrec* add_channel(struct userrec *user, char* cname)
 			if  (chanlist[i].created == 0)
 			{
 				strcpy(chanlist[i].name, cname);
-				strcpy(chanlist[i].chanmodes, "nt");
+				chanlist[i].topiclock = 1;
+				chanlist[i].noexternal = 1;
 				chanlist[i].created = time(NULL);
 				strcpy(chanlist[i].topic, "");
-				strcpy(chanlist[i].setby, user->nick);
+				strncpy(chanlist[i].setby, user->nick,NICKMAX);
 				chanlist[i].topicset = 0;
 				Ptr = &chanlist[i];
 				/* set created to 2 to indicate user
@@ -509,6 +582,13 @@ struct chanrec* add_channel(struct userrec *user, char* cname)
 	else
 	{
 		Ptr = FindChan(cname);
+		if (Ptr)
+		{
+			if (strcmp(Ptr->key,""))
+			{
+				/* channel has a key... */
+			}
+		}
 		created = 1;
 	}
 
@@ -540,7 +620,7 @@ struct chanrec* add_channel(struct userrec *user, char* cname)
 			}
 			WriteServ(user->fd,"353 %s = %s :%s", user->nick, Ptr->name, userlist(Ptr));
 			WriteServ(user->fd,"366 %s %s :End of /NAMES list.", user->nick, Ptr->name);
-			WriteServ(user->fd,"324 %s %s +%s",user->nick, Ptr->name,Ptr->chanmodes);
+			WriteServ(user->fd,"324 %s %s +%s",user->nick, Ptr->name,chanmodes(Ptr));
 			WriteServ(user->fd,"329 %s %s %d", user->nick, Ptr->name, Ptr->created);
 			return Ptr;
 		}
@@ -911,7 +991,6 @@ void process_modes(char **parameters,struct userrec* user,struct chanrec *chan,i
 	{
 		r = 0;
 
-		if (param < pcnt)
 		{
 			switch (modelist[ptr])
 			{
@@ -926,6 +1005,7 @@ void process_modes(char **parameters,struct userrec* user,struct chanrec *chan,i
 				break;
 
 				case 'o':
+					if ((param >= pcnt)) break;
 					if (mdir == 1)
 					{
 						r = give_ops(user,parameters[param++],chan,status);
@@ -942,6 +1022,7 @@ void process_modes(char **parameters,struct userrec* user,struct chanrec *chan,i
 				break;
 			
 				case 'h':
+					if ((param >= pcnt)) break;
 					if (mdir == 1)
 					{
 						r = give_hops(user,parameters[param++],chan,status);
@@ -959,6 +1040,7 @@ void process_modes(char **parameters,struct userrec* user,struct chanrec *chan,i
 			
 				
 				case 'v':
+					if ((param >= pcnt)) break;
 					if (mdir == 1)
 					{
 						r = give_voice(user,parameters[param++],chan,status);
@@ -975,6 +1057,7 @@ void process_modes(char **parameters,struct userrec* user,struct chanrec *chan,i
 				break;
 				
 				case 'b':
+					if ((param >= pcnt)) break;
 					if (mdir == 1)
 					{
 						r = add_ban(user,parameters[param++],chan,status);
@@ -984,21 +1067,127 @@ void process_modes(char **parameters,struct userrec* user,struct chanrec *chan,i
 						r = take_ban(user,parameters[param++],chan,status);
 					}
 					if (r)
-						{
+					{
 						strcat(outlist,"b");
 						strcpy(outpars[pc++],parameters[param-1]);
 					}
 				break;
-				
-				default:
-					if (channel_mode(user,modelist[ptr],chan,mdir,status))
+
+				case 'k':
+					if ((param >= pcnt)) break;
+					if (mdir == 1)
 					{
-						char blah[1];
-						blah[0] = modelist[ptr];
-						blah[1] = '\0';
-						strcat(outlist,blah);
+						if (!strcmp(chan->key,""))
+						{
+							strcat(outlist,"k");
+							strcpy(outpars[pc++],parameters[param++]);
+							strcpy(chan->key,parameters[param-1]);
+						}
+					}
+					else
+					{
+						/* only allow -k if correct key given */
+						if (strcmp(chan->key,""))
+						{
+							strcat(outlist,"k");
+							strcpy(chan->key,"");
+						}
 					}
 				break;
+				
+				case 'l':
+					if ((param >= pcnt)) break;
+					if (mdir == 1)
+					{
+						if (!chan->limit)
+						{
+							strcat(outlist,"l");
+							strcpy(outpars[pc++],parameters[param]);
+							chan->limit = atoi(parameters[param++]);
+						}
+					}
+					else
+					{
+						if (chan->limit)
+						{
+							strcat(outlist,"l");
+							chan->limit = 0;
+						}
+					}
+				break;
+				
+				case 'i':
+					if (chan->inviteonly != mdir)
+					{
+						strcat(outlist,"i");
+					}
+					chan->inviteonly = mdir;
+				break;
+				
+				case 't':
+					if (chan->topiclock != mdir)
+					{
+						strcat(outlist,"t");
+					}
+					chan->topiclock = mdir;
+				break;
+				
+				case 'n':
+					if (chan->noexternal != mdir)
+					{
+						strcat(outlist,"n");
+					}
+					chan->noexternal = mdir;
+				break;
+				
+				case 'm':
+					if (chan->moderated != mdir)
+					{
+						strcat(outlist,"m");
+					}
+					chan->moderated = mdir;
+				break;
+				
+				case 's':
+					if (chan->secret != mdir)
+					{
+						strcat(outlist,"s");
+						if (chan->c_private)
+						{
+							chan->c_private = 0;
+							if (mdir)
+							{
+								strcat(outlist,"-p+");
+							}
+							else
+							{
+								strcat(outlist,"+p-");
+							}
+						}
+					}
+					chan->secret = mdir;
+				break;
+				
+				case 'p':
+					if (chan->c_private != mdir)
+					{
+						strcat(outlist,"p");
+						if (chan->secret)
+						{
+							chan->secret = 0;
+							if (mdir)
+							{
+								strcat(outlist,"-s+");
+							}
+							else
+							{
+								strcat(outlist,"+s-");
+							}
+						}
+					}
+					chan->c_private = mdir;
+				break;
+				
 			}
 		}
 	}
@@ -1023,6 +1212,107 @@ void process_modes(char **parameters,struct userrec* user,struct chanrec *chan,i
 void handle_mode(char **parameters, int pcnt, struct userrec *user)
 {
 	struct chanrec* Ptr;
+	struct userrec* dest;
+	int can_change,i;
+	int direction = 1;
+	char outpars[MAXBUF];
+
+	dest = Find(parameters[0]);
+
+	if ((dest) && (pcnt == 1))
+	{
+		WriteServ(user->fd,"221 %s :+%s",user->nick,user->modes);
+		return;
+	}
+	if ((dest) && (pcnt > 1))
+	{
+		can_change = 0;
+		strcpy(outpars,"");
+		if (user != dest)
+		{
+			if (strstr(user->modes,"o"))
+			{
+				can_change = 1;
+			}
+		}
+		else
+		{
+			can_change = 1;
+		}
+		if (!can_change)
+		{
+			WriteServ(user->fd,"482 %s :Can't change mmode for other users",user->nick);
+			return;
+		}
+		for (i = 0; i < strlen(parameters[1]); i++)
+		{
+			if (parameters[1][i] == '+')
+			{
+				direction = 1;
+				strcat(outpars,"+");
+			}
+			else
+			if (parameters[1][i] == '-')
+			{
+				direction = 0;
+				strcat(outpars,"-");
+			}
+			else
+			{
+				can_change = 0;
+				if (strstr(user->modes,"o"))
+				{
+					can_change = 1;
+				}
+				else
+				{
+					if ((parameters[1][i] == 'i') || (parameters[1][i] == 'w') || (parameters[1][i] == 's'))
+					{
+						can_change = 1;
+					}
+				}
+				if (can_change)
+				{
+					if (direction == 1)
+					{
+						if (!strchr(dest->modes,parameters[1][i]))
+						{
+							dest->modes[strlen(dest->modes)+1]='\0';
+							dest->modes[strlen(dest->modes)] = parameters[1][i];
+							outpars[strlen(outpars)+1]='\0';
+							outpars[strlen(outpars)] = parameters[1][i];
+						}
+					}
+					else
+					{
+						int q = 0;
+						char temp[MAXBUF];
+						char moo[MAXBUF];
+
+						outpars[strlen(outpars)+1]='\0';
+						outpars[strlen(outpars)] = parameters[1][i];
+						
+						strcpy(temp,"");
+						for (q = 0; q < strlen(user->modes); q++)
+						{
+							if (user->modes[q] != parameters[1][i])
+							{
+								moo[0] = user->modes[q];
+								moo[1] = '\0';
+								strcat(temp,moo);
+							}
+						}
+						strcpy(user->modes,temp);
+					}
+				}
+			}
+		}
+		if (strlen(outpars))
+		{
+			WriteTo(user, dest, "MODE %s :%s", dest->nick, outpars);
+		}
+		return;
+	}
 	
 	Ptr = FindChan(parameters[0]);
 	if (Ptr)
@@ -1030,12 +1320,12 @@ void handle_mode(char **parameters, int pcnt, struct userrec *user)
 		if (pcnt == 1)
 		{
 			/* just /modes #channel */
-			WriteServ(user->fd,"324 %s %s +%s",user->nick, Ptr->name, Ptr->chanmodes);
+			WriteServ(user->fd,"324 %s %s +%s",user->nick, Ptr->name, chanmodes(Ptr));
 			WriteServ(user->fd,"329 %s %s %d", user->nick, Ptr->name, Ptr->created);
 		}
 		else
 		{
-			if (cstatus(user,Ptr) < STATUS_HOP)
+			if ((cstatus(user,Ptr) < STATUS_HOP) && (Ptr))
 			{
 				WriteServ(user->fd,"482 %s %s :You must be at least a half-operator",user->nick, Ptr->name);
 				return;
@@ -1068,15 +1358,37 @@ void handle_mode(char **parameters, int pcnt, struct userrec *user)
  * before the actual list as well. This code is used by many functions which
  * can function as "one to list" (see the RFC) */
 
-int loop_call(handlerfunc fn, char **parameters, int pcnt, struct userrec *u, int start, int end)
+int loop_call(handlerfunc fn, char **parameters, int pcnt, struct userrec *u, int start, int end, int joins)
 {
 	char plist[MAXBUF];
 	char *param;
 	char *pars[32];
 	char blog[32][MAXBUF];
-	int i = 0, j = 0, q = 0, total = 0, t = 0;
+	char blog2[32][MAXBUF];
+	int i = 0, j = 0, q = 0, total = 0, t = 0, t2 = 0, total2 = 0;
+	char keystr[MAXBUF];
+	char moo[MAXBUF];
 
+	strcpy(moo,"");
+	for (i = 0; i <10; i++)
+	{
+		if (!parameters[i])
+		{
+			parameters[i] = moo;
+		}
+	}
+	if (joins)
+	{
+		if ((pcnt > 1) && (parameters[1])) /* we have a key to copy */
+		{
+			strcpy(keystr,parameters[1]);
+		}
+	}
 
+	if (!parameters[start])
+	{
+		return 0;
+	}
 	if (!strstr(parameters[start],","))
 	{
 		return 0;
@@ -1084,7 +1396,10 @@ int loop_call(handlerfunc fn, char **parameters, int pcnt, struct userrec *u, in
 	strcpy(plist,"");
 	for (i = start; i <= end; i++)
 	{
-		strcat(plist,parameters[i]);
+		if (parameters[i])
+		{
+			strcat(plist,parameters[i]);
+		}
 	}
 	
 	j = 0;
@@ -1103,15 +1418,67 @@ int loop_call(handlerfunc fn, char **parameters, int pcnt, struct userrec *u, in
 	strcpy(blog[j++],param);
 	total = j;
 
+	if ((joins) && (keystr))
+	{
+		if (!strstr(keystr,","))
+		{
+			j = 0;
+			param = keystr;
+			t2 = strlen(keystr);
+			for (i = 0; i < t; i++)
+			{
+				if (keystr[i] == ',')
+				{
+					keystr[i] = '\0';
+					strcpy(blog2[j++],param);
+					param = keystr+i+1;
+				}
+			}
+			strcpy(blog2[j++],param);
+			total2 = j;
+		}
+	}
+
 	for (j = 0; j < total; j++)
 	{
-		pars[0] = blog[j];
-		for (q = end; q < pcnt; q++)
+		if (blog[j])
 		{
-			pars[q-end+1] = parameters[q+1];
+			pars[0] = blog[j];
+		}
+		for (q = end; q < pcnt-1; q++)
+		{
+			if (parameters[q+1])
+			{
+				pars[q-end+1] = parameters[q+1];
+			}
+		}
+		if ((joins) && (parameters[1]))
+		{
+			if (pcnt > 1)
+			{
+				if (!strstr(parameters[1],","))
+				{
+					pars[1] = blog2[j];
+				}
+			}
 		}
 		/* repeatedly call the function with the hacked parameter list */
-		fn(pars,pcnt-(end-start),u);
+		if ((joins) && (parameters[1]) && (pcnt > 1))
+		{
+			if (!strstr(parameters[1],","))
+			{
+				fn(pars,2,u);
+			}
+			else
+			{
+				pars[1] = parameters[1];
+				fn(pars,2,u);
+			}
+		}
+		else
+		{
+			fn(pars,pcnt-(end-start),u);
+		}
 	}
 
 	return 1;
@@ -1124,9 +1491,9 @@ void handle_join(char **parameters, int pcnt, struct userrec *user)
 	int i = 0;
 	
 	u = user;
-	if (loop_call(handle_join,parameters,pcnt,user,0,0))
+	if (loop_call(handle_join,parameters,pcnt,user,0,0,1))
 		return;
-	Ptr = add_channel(user,parameters[0]);
+	Ptr = add_channel(user,parameters[0],parameters[1]);
 }
 
 
@@ -1138,18 +1505,24 @@ void handle_part(char **parameters, int pcnt, struct userrec *user)
 
 	if (pcnt > 1)
 	{
-		if (loop_call(handle_part,parameters,pcnt,user,0,pcnt-2))
+		if (loop_call(handle_part,parameters,pcnt,user,0,pcnt-2,0))
 			return;
 		del_channel(user,parameters[0],parameters[1]);
 	}
 	else
 	{
-		if (loop_call(handle_part,parameters,pcnt,user,0,pcnt-1))
+		if (loop_call(handle_part,parameters,pcnt,user,0,pcnt-1,0))
 			return;
 		del_channel(user,parameters[0],NULL);
 	}
 }
 
+void handle_die(char **parameters, int pcnt, struct userrec *user)
+{
+	WriteOpers("*** DIE command from %s!%s@%s, terminating...",user->nick,user->ident,user->host);
+	sleep(5);
+	Exit(ERROR);
+}
 
 void handle_topic(char **parameters, int pcnt, struct userrec *user)
 {
@@ -1172,7 +1545,7 @@ void handle_topic(char **parameters, int pcnt, struct userrec *user)
 	}
 	else
 	{
-		if (loop_call(handle_topic,parameters,pcnt,user,0,pcnt-2))
+		if (loop_call(handle_topic,parameters,pcnt,user,0,pcnt-2,0))
 			return;
 		Ptr = FindChan(parameters[0]);
 		if (Ptr)
@@ -1199,7 +1572,7 @@ void send_error(char *s)
 	{
 		if (clientlist[i].fd)
 		{
-			WriteServ(clientlist[i].fd,"NOTICE :%s",s);
+			WriteServ(clientlist[i].fd,"NOTICE %s :%s",clientlist[i].nick,s);
 		}
 	}
 }
@@ -1236,7 +1609,7 @@ void NonBlocking(int s)
 }
 
 /* add a client connection to the sockets list */
-void AddClient(int socket, char* host)
+void AddClient(int socket, char* host, int port)
 {
 	int i;
 	int blocking = 1;
@@ -1246,13 +1619,14 @@ void AddClient(int socket, char* host)
 		if (clientlist[i].fd == 0) {
 			memset(&clientlist[i],0,sizeof(&clientlist[i]));
 			clientlist[i].fd = socket;
-			strcpy(clientlist[i].host, host);
-			strcpy(clientlist[i].dhost, host);
-			strcpy(clientlist[i].server, ServerName);
+			strncpy(clientlist[i].host, host,256);
+			strncpy(clientlist[i].dhost, host,256);
+			strncpy(clientlist[i].server, ServerName,256);
 			clientlist[i].registered = 0;
 			clientlist[i].signon = time(NULL);
 			clientlist[i].nping = time(NULL)+240;
 			clientlist[i].lastping = 1;
+			clientlist[i].port = port;
 			WriteServ(socket,"NOTICE Auth :Looking up your hostname...");
 			break;
 		}
@@ -1263,7 +1637,7 @@ void handle_names(char **parameters, int pcnt, struct userrec *user)
 {
 	struct chanrec* c;
 
-	if (loop_call(handle_names,parameters,pcnt,user,0,pcnt-1))
+	if (loop_call(handle_names,parameters,pcnt,user,0,pcnt-1,0))
 		return;
 	c = FindChan(parameters[0]);
 	if (c)
@@ -1283,7 +1657,7 @@ void handle_privmsg(char **parameters, int pcnt, struct userrec *user)
 	struct userrec *dest;
 	struct chanrec *chan;
 	
-	if (loop_call(handle_privmsg,parameters,pcnt,user,0,pcnt-2))
+	if (loop_call(handle_privmsg,parameters,pcnt,user,0,pcnt-2,0))
 		return;
 	if (parameters[0][0] == '#')
 	{
@@ -1317,7 +1691,7 @@ void handle_notice(char **parameters, int pcnt, struct userrec *user)
 	struct userrec *dest;
 	struct chanrec *chan;
 
-	if (loop_call(handle_notice,parameters,pcnt,user,0,pcnt-2))
+	if (loop_call(handle_notice,parameters,pcnt,user,0,pcnt-2,0))
 		return;
 	if (parameters[0][0] == '#')
 	{
@@ -1383,7 +1757,7 @@ void handle_whois(char **parameters, int pcnt, struct userrec *user)
 	struct userrec *dest;
 	char *t;
 
-	if (loop_call(handle_whois,parameters,pcnt,user,0,pcnt-1))
+	if (loop_call(handle_whois,parameters,pcnt,user,0,pcnt-1,0))
 		return;
 	dest = Find(parameters[0]);
 	if (dest)
@@ -1487,7 +1861,7 @@ void handle_list(char **parameters, int pcnt, struct userrec *user)
 	{
 		if (chanlist[i].created)
 		{
-			WriteServ(user->fd,"322 %s %s %d :[+%s] %s",user->nick,chanlist[i].name,usercount(&chanlist[i]),chanlist[i].chanmodes,chanlist[i].topic);
+			WriteServ(user->fd,"322 %s %s %d :[+%s] %s",user->nick,chanlist[i].name,usercount(&chanlist[i]),chanmodes(&chanlist[i]),chanlist[i].topic);
 		}
 	}
 	WriteServ(user->fd,"323 %s :End of channel list.",user->nick);
@@ -1587,6 +1961,7 @@ void ConnectUser(struct userrec *user)
 	WriteServ(user->fd,"005 %s :MAP KNOCK SAFELIST HCN MAXCHANNELS=20 MAXBANS=60 NICKLEN=30 TOPICLEN=307 KICKLEN=307 MAXTARGETS=20 AWAYLEN=307 :are supported by this server",user->nick);
 	WriteServ(user->fd,"005 %s :WALLCHOPS WATCH=128 SILENCE=5 MODES=13 CHANTYPES=# PREFIX=(ohv)@%c+ CHANMODES=ohvbeqa,kfL,l,psmntirRcOAQKVHGCuzN NETWORK=%s :are supported by this server",user->nick,'%',Network);
 	ShowMOTD(user);
+	WriteOpers("*** Client connecting on port %d: %s!%s@%s",user->port,user->nick,user->ident,user->host);
 }
 
 void handle_version(char **parameters, int pcnt, struct userrec *user)
@@ -1621,8 +1996,8 @@ void handle_user(char **parameters, int pcnt, struct userrec *user)
 	{
 		WriteServ(user->fd,"NOTICE Auth :No ident response, ident prefied with ~");
 		strcpy(user->ident,"~"); /* we arent checking ident... but these days why bother anyway? */
-		strcat(user->ident,parameters[0]);
-		strcpy(user->fullname,parameters[3]);
+		strncat(user->ident,parameters[0],64);
+		strncpy(user->fullname,parameters[3],128);
 		user->registered = (user->registered | 1);
 	}
 	else
@@ -1638,6 +2013,47 @@ void handle_user(char **parameters, int pcnt, struct userrec *user)
 	}
 }
 
+void handle_oper(char **parameters, int pcnt, struct userrec *user)
+{
+	char LoginName[MAXBUF];
+	char Password[MAXBUF];
+	char OperType[MAXBUF];
+	char TypeName[MAXBUF];
+	char Hostname[MAXBUF];
+	int i,j;
+
+	for (i = 0; i < ConfValueEnum("oper"); i++)
+	{
+		ConfValue("oper","name",i,LoginName);
+		ConfValue("oper","password",i,Password);
+		if ((!strcmp(LoginName,parameters[0])) && (!strcmp(Password,parameters[1])))
+		{
+			/* correct oper credentials */
+			ConfValue("oper","type",i,OperType);
+			WriteOpers("*** %s (%s@%s) is now an IRC operator of type %s",user->nick,user->ident,user->host,OperType);
+			WriteServ(user->fd,"381 %s :You are now an IRC operator of type %s",user->nick,OperType);
+			WriteServ(user->fd,"MODE %s :+o",user->nick);
+			for (j =0; j < ConfValueEnum("type"); j++)
+			{
+				ConfValue("type","name",j,TypeName);
+				if (!strcmp(TypeName,OperType))
+				{
+					/* found this oper's opertype */
+					ConfValue("type","host",j,Hostname);
+					strncpy(user->dhost,Hostname,256);
+				}
+			}
+			if (!strstr(user->modes,"o"))
+			{
+				strcat(user->modes,"o");
+			}
+			return;
+		}
+	}
+	/* no such oper */
+	WriteServ(user->fd,"491 %s :Invalid oper credentials",user->nick);
+}
+				
 void handle_nick(char **parameters, int pcnt, struct userrec *user)
 {
 	if (!strcmp(parameters[0],user->nick))
@@ -1771,6 +2187,12 @@ void process_command(struct userrec *user, char* cmd)
 						cmd_found = 1;
 						break;
 					}
+					if ((!strchr(user->modes,cmdlist[i].flags_needed)) && (cmdlist[i].flags_needed))
+					{
+						WriteServ(user->fd,"481 %s :Permission Denied- You do not have the required operator privilages",user->nick,command);
+						cmd_found = 1;
+						break;
+					}
 					if ((user->registered == 7) || (!strcmp(command,"USER")) || (!strcmp(command,"NICK")) || (!strcmp(command,"PASS")))
 					{
 						cmdlist[i].handler_function(command_p,items,user);
@@ -1798,78 +2220,107 @@ void SetupCommandTable(void)
   
   strcpy(cmdlist[i].command,		"USER");
   cmdlist[i].handler_function = 	handle_user;
+  cmdlist[i].flags_needed=		0;
   cmdlist[i++].min_params=        	4;
   
   strcpy(cmdlist[i].command,		"NICK");
   cmdlist[i].handler_function = 	handle_nick;
+  cmdlist[i].flags_needed=		0;
   cmdlist[i++].min_params=        	1;
   
   strcpy(cmdlist[i].command,		"QUIT");
   cmdlist[i].handler_function = 	handle_quit;
+  cmdlist[i].flags_needed=		0;
   cmdlist[i++].min_params=        	1;
 
   strcpy(cmdlist[i].command,		"VERSION");
   cmdlist[i].handler_function = 	handle_version;
+  cmdlist[i].flags_needed=		0;
   cmdlist[i++].min_params=        	0;
 
   strcpy(cmdlist[i].command,		"PING");
   cmdlist[i].handler_function = 	handle_ping;
+  cmdlist[i].flags_needed=		0;
   cmdlist[i++].min_params=        	1;
 
   strcpy(cmdlist[i].command,		"PONG");
   cmdlist[i].handler_function = 	handle_pong;
+  cmdlist[i].flags_needed=		0;
   cmdlist[i++].min_params=        	1;
 
   strcpy(cmdlist[i].command,		"ADMIN");
   cmdlist[i].handler_function = 	handle_admin;
+  cmdlist[i].flags_needed=		0;
   cmdlist[i++].min_params=        	0;
 
   strcpy(cmdlist[i].command,		"PRIVMSG");
   cmdlist[i].handler_function = 	handle_privmsg;
+  cmdlist[i].flags_needed=		0;
   cmdlist[i++].min_params=        	2;
 
   strcpy(cmdlist[i].command,		"WHOIS");
   cmdlist[i].handler_function = 	handle_whois;
+  cmdlist[i].flags_needed=		0;
   cmdlist[i++].min_params=        	1;
 
   strcpy(cmdlist[i].command,		"NOTICE");
   cmdlist[i].handler_function = 	handle_notice;
+  cmdlist[i].flags_needed=		0;
   cmdlist[i++].min_params=        	2;
 
   strcpy(cmdlist[i].command,		"JOIN");
   cmdlist[i].handler_function = 	handle_join;
+  cmdlist[i].flags_needed=		0;
   cmdlist[i++].min_params=        	1;
 
   strcpy(cmdlist[i].command,		"NAMES");
   cmdlist[i].handler_function = 	handle_names;
+  cmdlist[i].flags_needed=		0;
   cmdlist[i++].min_params=        	1;
 
   strcpy(cmdlist[i].command,		"PART");
   cmdlist[i].handler_function = 	handle_part;
+  cmdlist[i].flags_needed=		0;
   cmdlist[i++].min_params=        	1;
 
   strcpy(cmdlist[i].command,		"MODE");
   cmdlist[i].handler_function = 	handle_mode;
+  cmdlist[i].flags_needed=		0;
   cmdlist[i++].min_params=        	1;
 
   strcpy(cmdlist[i].command,		"TOPIC");
   cmdlist[i].handler_function = 	handle_topic;
+  cmdlist[i].flags_needed=		0;
   cmdlist[i++].min_params=        	2;
 
   strcpy(cmdlist[i].command,		"WHO");
   cmdlist[i].handler_function = 	handle_who;
+  cmdlist[i].flags_needed=		0;
   cmdlist[i++].min_params=        	2;
 
   strcpy(cmdlist[i].command,		"MOTD");
   cmdlist[i].handler_function = 	handle_motd;
+  cmdlist[i].flags_needed=		0;
   cmdlist[i++].min_params=        	2;
 
   strcpy(cmdlist[i].command,		"RULES");
   cmdlist[i].handler_function = 	handle_rules;
+  cmdlist[i].flags_needed=		0;
+  cmdlist[i++].min_params=        	2;
+
+  strcpy(cmdlist[i].command,		"OPER");
+  cmdlist[i].handler_function = 	handle_oper;
+  cmdlist[i].flags_needed=		0;
   cmdlist[i++].min_params=        	2;
 
   strcpy(cmdlist[i].command,		"LIST");
   cmdlist[i].handler_function = 	handle_list;
+  cmdlist[i].flags_needed=		0;
+  cmdlist[i++].min_params=        	0;
+
+  strcpy(cmdlist[i].command,		"DIE");
+  cmdlist[i].handler_function = 	handle_die;
+  cmdlist[i].flags_needed=		'o';
   cmdlist[i++].min_params=        	0;
 
   MAXCOMMAND = i;
@@ -1922,6 +2373,11 @@ int InspIRCd(void)
   struct timeval tv;
   int count2;
 
+  if ((geteuid()) && (getuid()) == 0)
+  {
+	printf("WARNING!!! You are running an irc server as ROOT!!! DO NOT DO THIS!!!\n\n");
+	Exit(ERROR);
+  }
   SetupCommandTable();
   memset(clientlist, 0, sizeof(clientlist));
   memset(chanlist,0,sizeof(chanlist));
@@ -1935,34 +2391,13 @@ int InspIRCd(void)
   ConfValue("files","motd",0,motd);
   ConfValue("files", "rules",0,rules);
   ConfValue("options","prefixquit",0,PrefixQuit);
-  if ((ConfValue("server","port",0,configToken)) == FALSE)
-  {
-    printf("ERROR: Missing ports from server directive\n");
-    return (ERROR);
-  }
 
-  /* break out the ports */
-  if ((temp = (char *) strtok (configToken, ",")) != NULL)
+  for (count = 0; count < ConfValueEnum("bind"); count++)
   {
-      ports[0] = atoi (temp);
-      for (count = 1; count < MAXSOCKS; count++)
-      {
-        if ((temp = (char *) strtok (NULL, ",")) != NULL)
-	{
-         	ports[count] = atoi (temp);
-	}
-        else
-	{
-		break;
-	}
-      }
-    portCount = count;
+	ConfValue("bind","port",count,configToken);
+	ports[count] = atoi(configToken);
   }
-  else
-  {
-     printf("ERROR: No TCP ports supplied in config file. Aborting\n");
-     return(ERROR);
-  }
+  portCount = ConfValueEnum("bind");
 
   printf("InspIRCd is now running!\n");
 
@@ -1978,12 +2413,12 @@ int InspIRCd(void)
 
   for (count = 0; count < portCount; count++)
   {
-      if ((openSockfd[boundPortCount] = OpenTCPSocket ()) == ERROR)
+      if ((openSockfd[boundPortCount] = OpenTCPSocket()) == ERROR)
       {
-	  return (ERROR);
+	  return(ERROR);
       }
 
-      if (BindSocket (openSockfd[boundPortCount], client, server, ports[count]) == ERROR)
+      if (BindSocket(openSockfd[boundPortCount],client,server,ports[count]) == ERROR)
       {
       }
       else			/* well we at least bound to one socket so we'll continue */
@@ -2092,21 +2527,19 @@ int InspIRCd(void)
             {
 	      char target[MAXBUF];
               incomingSockfd = accept (openSockfd[count], (struct sockaddr *) &client, &length);
+	      SafeStrncpy (target, (char *) inet_ntoa (client.sin_addr), MAXBUF);
  	      if (incomingSockfd < 0)
 	      {
-		char stuff[MAXBUF];
-		sprintf(stuff,"*** WARNING: Accept failed on port %d", ports[count]);
-	        send_error(stuff);
+	        WriteOpers("*** WARNING: Accept failed on port %d (%s)", ports[count],target);
 	        break;
 	      }
-	      SafeStrncpy (target, (char *) inet_ntoa (client.sin_addr), MAXBUF);
-	      AddClient(incomingSockfd, target);
+	      AddClient(incomingSockfd, target,ports[count]);
 	      break;
-	    }		/* end if(FD_ISSET) */
+	    }
 
-	}		/* end for() */
-      }		/* end else (selectResult > 0) */
-  }			/* end main for(; ; ) loop */
+	}
+      }
+  }
 
   /* not reached */
   close (incomingSockfd);

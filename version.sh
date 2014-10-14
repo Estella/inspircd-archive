@@ -1,2 +1,2 @@
 #!/bin/bash
-echo "InspIRCd-1.0[Alpha1]"
+echo "InspIRCd-1.0[Alpha2]"
