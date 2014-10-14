@@ -4,39 +4,73 @@
 #include "modules.h"
 
 // Class ModuleFoobar inherits from Module
-// and shows the world when one is created/destroyed.
+// It just outputs simple debug strings to show its methods are working.
 
 class ModuleFoobar : public Module
 {
+ private:
+	 
+	 // It is recommended that your class makes use of one or more Server
+	 // objects. A server object is a class which contains methods which
+	 // encapsulate the exports from the core of the ircd.
+	 // such methods include Debug, SendChannel, etc.
+ 
+	 Server *Srv;
  public:
 	ModuleFoobar()
 	{
-		debug("*** Example module loaded ***");
+		// The constructor just creates an instance of the server class
+	
+		Srv = new Server;
 	}
 	
 	virtual ~ModuleFoobar()
 	{
-		debug("*** Example module unloaded ***");
+		// destructor deletes the instance of the server class
+	
+		delete Srv;
+	}
+	
+	virtual Version GetVersion()
+	{
+		// this method instantiates a class of type Version, and returns
+		// the modules version information using it.
+	
+		return Version(1,0,0,0);
 	}
 	
 	virtual void OnUserConnect(userrec* user)
 	{
-		debug("Foobar: user connected: %s",user->nick);
+		// method called when a user connects
+	
+		string b = user->nick;
+		Srv->Debug("Foobar: User connecting: " + b);
 	}
 
 	virtual void OnUserQuit(userrec* user)
 	{
-		debug("Foobar: user quitting: %s",user->nick);
+		// method called when a user disconnects
+	
+		string b = user->nick;
+		Srv->Debug("Foobar: User quitting: " + b);
 	}
 	
 	virtual void OnUserJoin(userrec* user, chanrec* channel)
 	{
-		debug("Foobar: user %s joined %s",user->nick,channel->name);
+		// method called when a user joins a channel
+	
+		string c = channel->name;
+		string b = user->nick;
+		Srv->Debug("Foobar: User " + b + " joined " + c);
 	}
 
 	virtual void OnUserPart(userrec* user, chanrec* channel)
 	{
-		debug("Foobar: user %s parted %s",user->nick,channel->name);
+		// method called when a user parts a channel
+	
+		string c = channel->name;
+		string b = user->nick;
+		Srv->Debug("Foobar: User " + b + " parted " + c);
 	}
 
 };

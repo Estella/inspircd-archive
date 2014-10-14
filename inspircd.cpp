@@ -14,6 +14,31 @@
  * ---------------------------------------------------
  
  $Log: inspircd.cpp,v $
+ Revision 1.31  2003/01/14 00:46:02  brain
+ Added m_cloaking.so module, provides host masking
+
+ Revision 1.30  2003/01/13 22:30:50  brain
+ Added Admin class (holds /admin info for modules)
+ Added methods to Server class
+
+ Revision 1.29  2003/01/13 00:43:29  brain
+ Added Server class
+ Added more code to example module demonstrating use of Server class
+
+ Revision 1.28  2003/01/12 17:40:44  brain
+ ./configure improved by Craig (better prompts, dir creation)
+ '/stats z' added detail
+
+ Revision 1.27  2003/01/12 16:49:53  brain
+ Added '/stats z'
+
+ Revision 1.26  2003/01/12 15:01:18  brain
+ Added hostname/ip caching to speed up connects
+
+ Revision 1.25  2003/01/11 21:39:57  brain
+ Made ircd cache message of the day in a vector (faster!)
+ Added support for multiple lines of /NAMES on large channels
+
  Revision 1.24  2003/01/11 19:00:10  brain
  Added /USERHOST command
 
@@ -113,23 +138,30 @@ char PrefixQuit[MAXBUF];
 char DieValue[MAXBUF];
 int debugging = 0;
 int MODCOUNT = -1;
-time_t startup_time = 0;
+time_t startup_time = time(NULL);
 
-
-namespace std
+template<> struct hash<in_addr>
 {
-	template<> struct hash<string>
+	size_t operator()(const struct in_addr &a) const
 	{
-		size_t operator()(const string &s) const
-		{
-			char a[MAXBUF];
-			static struct hash<const char *> strhash;
-			strcpy(a,s.c_str());
-			strlower(a);
-			return strhash(a);
-		}
-	};
-}
+		size_t q;
+		memcpy(&q,&a,sizeof(size_t));
+		return q;
+	}
+};
+
+template<> struct hash<string>
+{
+	size_t operator()(const string &s) const
+	{
+		char a[MAXBUF];
+		static struct hash<const char *> strhash;
+		strcpy(a,s.c_str());
+		strlower(a);
+		return strhash(a);
+	}
+};
+	
 
 
 struct StrHashComp
@@ -145,19 +177,42 @@ struct StrHashComp
 
 };
 
+struct InAddr_HashComp
+{
+
+	bool operator()(const in_addr &s1, const in_addr &s2) const
+	{
+		size_t q;
+		size_t p;
+		
+		memcpy(&q,&s1,sizeof(size_t));
+		memcpy(&p,&s2,sizeof(size_t));
+		
+		return (q == p);
+	}
+
+};
+
+
 typedef hash_map<string, userrec*, hash<string>, StrHashComp> user_hash;
 typedef hash_map<string, chanrec*, hash<string>, StrHashComp> chan_hash;
+typedef hash_map<in_addr,string*, hash<in_addr>, InAddr_HashComp> address_cache;
 typedef vector<command_t> command_table;
 typedef DLLFactory<ModuleFactory> ircd_module;
+typedef vector<string> file_cache;
 
 user_hash clientlist;
 chan_hash chanlist;
 command_table cmdlist;
+file_cache MOTD;
+file_cache RULES;
+address_cache IP;
 vector<Module*> modules(255);
 vector<ircd_module*> factory(255);
 
 struct linger linger = { 0 };
 char bannerBuffer[MAXBUF];
+int boundPortCount = 0;
 
 /* prototypes */
 
@@ -178,6 +233,31 @@ void chop(char* str)
 	}
 }
 
+
+extern "C" string getservername()
+{
+	return ServerName;
+}
+
+extern "C" string getnetworkname()
+{
+	return Network;
+}
+
+extern "C" string getadminname()
+{
+	return AdminName;
+}
+
+extern "C" string getadminemail()
+{
+	return AdminEmail;
+}
+
+extern "C" string getadminnick()
+{
+	return AdminNick;
+}
 
 extern "C" void debug(char *text, ...)
 {
@@ -204,6 +284,38 @@ extern "C" void debug(char *text, ...)
   }
 }
 
+void readfile(file_cache &F, char* fname)
+{
+  FILE* file;
+  char linebuf[MAXBUF];
+
+  debug("readfile: loading %s",fname);
+  F.clear();
+  file =  fopen(fname,"r");
+  if (file)
+  {
+  	while (!feof(file))
+  	{
+  		fgets(linebuf,sizeof(linebuf),file);
+  		linebuf[strlen(linebuf)-1]='\0';
+  		if (!strcmp(linebuf,""))
+  		{
+  			strcpy(linebuf,"  ");
+  		}
+  		if (!feof(file))
+  		{
+  			F.push_back(linebuf);
+  		}
+  	}
+  	fclose(file);
+  }
+  else
+  {
+	  debug("readfile: failed to load file: %s",fname);
+  }
+  debug("readfile: loaded %s, %d lines",fname,F.size());
+}
+
 void ReadConfig(void)
 {
   char dbg[MAXBUF];
@@ -225,6 +337,8 @@ void ReadConfig(void)
   {
 	  debugging = 1;
   }
+  readfile(MOTD,motd);
+  readfile(RULES,rules);
 }
 
 void Blocking(int s)
@@ -514,9 +628,10 @@ void strlower(char *n)
 
 /* verify that a user's nickname is valid */
 
-extern "C" int isnick(char *n)
+extern "C" int isnick(const char* n)
 {
 	int i = 0;
+	char v[MAXBUF];
 	if (!n)
 	{
 		return 0;
@@ -527,7 +642,7 @@ extern "C" int isnick(char *n)
 	}
 	if (strlen(n) > NICKMAX-1)
 	{
-		n[NICKMAX-1] = '\0';
+		return 0;
 	}
 	for (i = 0; i <= strlen(n)-1; i++)
 	{
@@ -577,7 +692,7 @@ void update_stats_l(int fd,int data_out) /* add one line-out to stats L for this
 
 /* find a channel record by channel name and return a pointer to it */
 
-extern "C" struct chanrec* FindChan(char* chan)
+extern "C" struct chanrec* FindChan(const char* chan)
 {
 	chan_hash::iterator iter = chanlist.find(chan);
 
@@ -730,9 +845,9 @@ int cstatus(struct userrec *user, struct chanrec *chan)
 /* compile a userlist of a channel into a string, each nick seperated by
  * spaces and op, voice etc status shown as @ and + */
 
-char* userlist(struct chanrec *c)
+void userlist(struct userrec *user,struct chanrec *c)
 {
-	strcpy(list,"");
+	sprintf(list,"353 %s = %s :", user->nick, c->name);
   	for (user_hash::const_iterator i = clientlist.begin(); i != clientlist.end(); i++)
 	{
 		if (has_channel(i->second,c) && (i->second->fd != 0))
@@ -742,11 +857,21 @@ char* userlist(struct chanrec *c)
 				strcat(list,cmode(i->second,c));
 				strcat(list,i->second->nick);
 				strcat(list," ");
+				if (strlen(list)>(480-NICKMAX))
+				{
+					/* list overflowed into
+					 * multiple numerics */
+					WriteServ(user->fd,list);
+					sprintf(list,"353 %s = %s :", user->nick, c->name);
+				}
 			}
 		}
 	}
-	debug("userlist: %s %s",c->name,list);
-	return list;
+	/* if whats left in the list isnt empty, send it */
+	if (strcmp(list,""))
+	{
+		WriteServ(user->fd,list);
+	}
 }
 
 /* return a count of the users on a specific channel */
@@ -854,7 +979,7 @@ struct chanrec* add_channel(struct userrec *user, char* cname, char* key)
 				WriteServ(user->fd,"332 %s %s :%s", user->nick, Ptr->name, Ptr->topic);
 				WriteServ(user->fd,"333 %s %s %s %d", user->nick, Ptr->name, Ptr->setby, Ptr->topicset);
 			}
-			WriteServ(user->fd,"353 %s = %s :%s", user->nick, Ptr->name, userlist(Ptr));
+			userlist(user,Ptr);
 			WriteServ(user->fd,"366 %s %s :End of /NAMES list.", user->nick, Ptr->name);
 			WriteServ(user->fd,"324 %s %s +%s",user->nick, Ptr->name,chanmodes(Ptr));
 			WriteServ(user->fd,"329 %s %s %d", user->nick, Ptr->name, Ptr->created);
@@ -2112,7 +2237,7 @@ struct userrec* ReHashNick(char* Old, char* New)
 
 
 /* add a client connection to the sockets list */
-void AddClient(int socket, char* host, int port)
+void AddClient(int socket, char* host, int port, bool iscached)
 {
 	int i;
 	int blocking = 1;
@@ -2140,6 +2265,8 @@ void AddClient(int socket, char* host, int port)
 	NonBlocking(socket);
         debug("AddClient: %d %s %d",socket,host,port);
 
+
+	bzero(clientlist[tempnick],sizeof(userrec));
 	clientlist[tempnick]->fd = socket;
 	strncpy(clientlist[tempnick]->nick, tn2,256);
 	strncpy(clientlist[tempnick]->host, host,256);
@@ -2150,7 +2277,16 @@ void AddClient(int socket, char* host, int port)
 	clientlist[tempnick]->nping = time(NULL)+240;
 	clientlist[tempnick]->lastping = 1;
 	clientlist[tempnick]->port = port;
-	WriteServ(socket,"NOTICE Auth :Looking up your hostname...");
+
+	if (iscached)
+	{
+		WriteServ(socket,"NOTICE Auth :Found your hostname (cached)...");
+	}
+	else
+	{
+		WriteServ(socket,"NOTICE Auth :Looking up your hostname...");
+	}
+
 	if(CleanAndResolve(resolved, host) != TRUE)
 	{
 		snprintf(resolved,MAXBUF,"%s",host);
@@ -2170,7 +2306,8 @@ void handle_names(char **parameters, int pcnt, struct userrec *user)
 	c = FindChan(parameters[0]);
 	if (c)
 	{
-		WriteServ(user->fd,"353 %s = %s :%s", user->nick, c->name, userlist(c));
+		/*WriteServ(user->fd,"353 %s = %s :%s", user->nick, c->name,*/
+		userlist(user,c);
 		WriteServ(user->fd,"366 %s %s :End of /NAMES list.", user->nick, c->name);
 	}
 	else
@@ -2265,7 +2402,7 @@ char* chlist(struct userrec *user)
 	int i = 0;
 	char cmp[MAXBUF];
 
-        debug("chlist: %s %s",user->nick);
+        debug("chlist: %s",user->nick);
 	strcpy(lst,"");
 	if (!user)
 	{
@@ -2544,68 +2681,32 @@ void handle_admin(char **parameters, int pcnt, struct userrec *user)
 
 void ShowMOTD(struct userrec *user)
 {
-	FILE* f;
-	char linebuf[MAXBUF];
-	
-        debug("ShowMOTD: %s",user->nick);
-	f =  fopen(motd,"r");
-	if (f)
-	{
-		WriteServ(user->fd,"375 %s :- message of the day, %s",user->nick,ServerName);
-		while (!feof(f))
-		{
-			fgets(linebuf,sizeof(linebuf),f);
-			linebuf[strlen(linebuf)-1]='\0';
-			if (!strcmp(linebuf,""))
-			{
-				/* allow blank lines */
-				strcpy(linebuf,"  ");
-			}
-			if (!feof(f))
-			{
-				WriteServ(user->fd,"372 %s :- %s",user->nick,linebuf);
-			}
-		}
-		WriteServ(user->fd,"376 %s :End of %s message of the day.",user->nick,ServerName);
-		fclose(f);
-	}
-	else
+	if (!MOTD.size())
 	{
 		WriteServ(user->fd,"422 %s :Message of the day file is missing.",user->nick);
+		return;
 	}
+  	WriteServ(user->fd,"375 %s :- %s message of the day",user->nick,ServerName);
+	for (int i = 0; i != MOTD.size(); i++)
+	{
+				WriteServ(user->fd,"372 %s :- %s",user->nick,MOTD[i].c_str());
+	}
+	WriteServ(user->fd,"376 %s :End of %s message of the day.",user->nick,ServerName);
 }
 
 void ShowRULES(struct userrec *user)
 {
-	FILE* f;
-	char linebuf[MAXBUF];
-	
-        debug("ShowRULES: %s",user->nick);
-	f =  fopen(rules,"r");
-	if (f)
+	if (!RULES.size())
 	{
-		WriteServ(user->fd,"NOTICE %s :*** \002%s\002 rules:",user->nick,ServerName);
-		while (!feof(f))
-		{
-			fgets(linebuf,sizeof(linebuf),f);
-			linebuf[strlen(linebuf)-1]='\0';
-			if (!strcmp(linebuf,""))
-			{
-				/* allow blank lines */
-				strcpy(linebuf,"  ");
-			}
-			if (!feof(f))
-			{
-				WriteServ(user->fd,"NOTICE %s :%s",user->nick,linebuf);
-			}
-		}
-		WriteServ(user->fd,"NOTICE %s :*** End of \002%s\002 rules.",user->nick,ServerName);
-		fclose(f);
+		WriteServ(user->fd,"NOTICE %s :Rules file is missing.",user->nick);
+		return;
 	}
-	else
+  	WriteServ(user->fd,"NOTICE %s :%s rules",user->nick,ServerName);
+	for (int i = 0; i != RULES.size(); i++)
 	{
-		WriteServ(user->fd,"NOTICE %s :*** Rules file is missing.",user->nick);
+				WriteServ(user->fd,"NOTICE %s :%s",user->nick,RULES[i].c_str());
 	}
+	WriteServ(user->fd,"NOTICE %s :End of %s rules.",user->nick,ServerName);
 }
 
 /* shows the message of the day, and any other on-logon stuff */
@@ -2728,7 +2829,20 @@ void handle_stats(char **parameters, int pcnt, struct userrec *user)
 			
 	}
 
-	/* stats o (O *@*.sprint-canada.net * daisy rhgwlcLkKbBnGzWHv clients) */
+	/* stats z (debug and memory info) */
+	if (!strcasecmp(parameters[0],"z"))
+	{
+		WriteServ(user->fd,"249 %s :Users(HASH_MAP) %d (%d bytes, %d buckets)",user->nick,clientlist.size(),clientlist.size()*sizeof(userrec),clientlist.bucket_count());
+		WriteServ(user->fd,"249 %s :Channels(HASH_MAP) %d (%d bytes, %d buckets)",user->nick,chanlist.size(),chanlist.size()*sizeof(chanrec),chanlist.bucket_count());
+		WriteServ(user->fd,"249 %s :Commands(VECTOR) %d (%d bytes)",user->nick,cmdlist.size(),cmdlist.size()*sizeof(command_t));
+		WriteServ(user->fd,"249 %s :MOTD(VECTOR) %d, RULES(VECTOR) %d",user->nick,MOTD.size(),RULES.size());
+		WriteServ(user->fd,"249 %s :address_cache(HASH_MAP) %d (%d buckets)",user->nick,IP.size(),IP.bucket_count());
+		WriteServ(user->fd,"249 %s :Modules(VECTOR) %d (%d)",user->nick,modules.size(),modules.size()*sizeof(Module));
+		WriteServ(user->fd,"249 %s :ClassFactories(VECTOR) %d (%d)",user->nick,factory.size(),factory.size()*sizeof(ircd_module));
+		WriteServ(user->fd,"249 %s :Ports(STATIC_ARRAY) %d",user->nick,boundPortCount);
+	}
+	
+	/* stats o */
 	if (!strcasecmp(parameters[0],"o"))
 	{
 		for (int i = 0; i < ConfValueEnum("oper"); i++)
@@ -3175,7 +3289,7 @@ int InspIRCd(void)
   char addrs[MAXBUF][255];
   int openSockfd[MAXSOCKS], incomingSockfd, result = TRUE;
   socklen_t length;
-  int count = 0, scanDetectTrigger = TRUE, showBanner = FALSE, boundPortCount = 0;
+  int count = 0, scanDetectTrigger = TRUE, showBanner = FALSE;
   int selectResult = 0;
   char *temp, configToken[MAXBUF], stuff[MAXBUF], Addr[MAXBUF];
   char resolvedHost[MAXBUF];
@@ -3184,7 +3298,7 @@ int InspIRCd(void)
   int count2;
 
   debug("InspIRCd: startup: begin");
-  debug("$Id: inspircd.cpp,v 1.24 2003/01/11 19:00:10 brain Exp $");
+  debug("$Id: inspircd.cpp,v 1.31 2003/01/14 00:46:02 brain Exp $");
   if ((geteuid()) && (getuid()) == 0)
   {
 	printf("WARNING!!! You are running an irc server as ROOT!!! DO NOT DO THIS!!!\n\n");
@@ -3394,14 +3508,31 @@ int InspIRCd(void)
             {
 	      char target[MAXBUF];
               incomingSockfd = accept (openSockfd[count], (struct sockaddr *) &client, &length);
-	      SafeStrncpy (target, (char *) inet_ntoa (client.sin_addr), MAXBUF);
- 	      if (incomingSockfd < 0)
+	      
+              address_cache::iterator iter = IP.find(client.sin_addr);
+	      bool iscached = false;
+              if (iter == IP.end())
+              {
+                        /* ip isn't in cache, add it */
+                        SafeStrncpy (target, (char *) inet_ntoa (client.sin_addr), MAXBUF);
+                        /* hostname now in 'target' */
+                        IP[client.sin_addr] = new string(target);
+			/* hostname in cache */
+              }
+              else
+              {
+			/* found ip (cached) */
+	                SafeStrncpy(target, iter->second->c_str(), MAXBUF);
+			iscached = true;
+	      }
+
+	      if (incomingSockfd < 0)
 	      {
 	        WriteOpers("*** WARNING: Accept failed on port %d (%s)", ports[count],target);
 	  	debug("InspIRCd: accept failed: %d",ports[count]);
 	        break;
 	      }
-	      AddClient(incomingSockfd, target,ports[count]);
+	      AddClient(incomingSockfd, target,ports[count],iscached);
   	      debug("InspIRCd: adding client on port %d fd=%d",ports[count],incomingSockfd);
 	      break;
 	    }

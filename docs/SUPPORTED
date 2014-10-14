@@ -3,7 +3,7 @@ document will show you the commands and modes that are supported in this
 version.
 
 USER COMMANDS: USER NICK QUIT VERSION PING PONG ADMIN PRIVMSG INFO TIME WHOIS NOTICE JOIN
-               PART MODE TOPIC WHO MOTD RULES OPER LUSERS NAMES KICK LIST STATS
+               PART MODE TOPIC WHO MOTD RULES OPER LUSERS NAMES KICK LIST STATS USERHOST
 
 OPER COMMANDS: REHASH KILL DIE WALLOPS RESTART*
 
@@ -18,6 +18,14 @@ USER MODES: i,w,s,o
 
 The following features are supported:
 
-* Dynamic module support
-* Object orientated architecture to save memory and increase speed
-* Connection multiplexing, one process for all (no forking!)
+	* Dynamic module support
+	* Object orientated architecture to save memory and increase speed
+	* Connection multiplexing, one process for all (no forking!)
+
+The following operating systems are supported:
+
+	* Linux		(i386, possibly others)
+				Tested on: RedHat, Slackware
+	* FreeBSD 	(i386, possibly others)
+				Tested on: 4.7-STABLE
+
