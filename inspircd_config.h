@@ -4,10 +4,10 @@
 #define SYSLOG_LEVEL LOG_NOTICE
 #define CONFIG_FILE "/home/brain/inspircd/inspircd.conf"
 #define MOD_PATH "/home/brain/inspircd/modules"
-#define VERSION "InspIRCd-1.0[Alpha0]"
+#define VERSION "InspIRCd-1.0[Alpha1]"
 #define MAXCLIENTS 64
 #define NICKMAX 32
 #define CHANMAX 64
 #define MAXCHANS 20
-#define MAXCHAN 10000
+#define MAXCHAN 64
 #define MAXMODES 256

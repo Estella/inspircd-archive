@@ -1124,7 +1124,7 @@ void handle_join(char **parameters, int pcnt, struct userrec *user)
 	int i = 0;
 	
 	u = user;
-	if (loop_call(handle_join,parameters,pcnt,user,0,pcnt-1))
+	if (loop_call(handle_join,parameters,pcnt,user,0,0))
 		return;
 	Ptr = add_channel(user,parameters[0]);
 }
@@ -1157,19 +1157,35 @@ void handle_topic(char **parameters, int pcnt, struct userrec *user)
 	struct userrec* u;
 	u = user;
 
-	if (loop_call(handle_topic,parameters,pcnt,user,0,pcnt-2))
-		return;
-	Ptr = FindChan(parameters[0]);
-	if (Ptr)
+	if (pcnt == 1)
 	{
-		strcpy(Ptr->topic,parameters[1]);
-		strcpy(Ptr->setby,user->nick);
-		Ptr->topicset = time(NULL);
-		WriteChannel(Ptr,user,"TOPIC %s :%s",Ptr->name, Ptr->topic);
+		Ptr = FindChan(parameters[0]);
+		if (Ptr->topicset)
+		{
+			WriteServ(user->fd,"332 %s %s :%s", user->nick, Ptr->name, Ptr->topic);
+			WriteServ(user->fd,"333 %s %s %s %d", user->nick, Ptr->name, Ptr->setby, Ptr->topicset);
+		}
+		else
+		{
+			WriteServ(user->fd,"331 %s %s :No topic is set.", user->nick, Ptr->name);
+		}
 	}
 	else
 	{
-		WriteServ(user->fd,"401 %s %s :No suck nick/channel",user->nick, parameters[0]);
+		if (loop_call(handle_topic,parameters,pcnt,user,0,pcnt-2))
+			return;
+		Ptr = FindChan(parameters[0]);
+		if (Ptr)
+		{
+			strcpy(Ptr->topic,parameters[1]);
+			strcpy(Ptr->setby,user->nick);
+			Ptr->topicset = time(NULL);
+			WriteChannel(Ptr,user,"TOPIC %s :%s",Ptr->name, Ptr->topic);
+		}
+		else
+		{
+			WriteServ(user->fd,"401 %s %s :No suck nick/channel",user->nick, parameters[0]);
+		}
 	}
 }
 
@@ -1196,38 +1212,19 @@ void Error(int status)
 
 int main (int argc, char *argv[])
 {
-      Start();
-      if (CheckConfig() == FALSE)
-      {
-	  printf("ERROR: Your config file is missing, this IRCd will self destruct in 10 seconds :p\n");
-          Exit(ERROR);
-      }
-      if (InitConfig() == FALSE)
-      {
-	  printf("ERROR: Your config file is invalid, ending the universe :p\n");
-          Exit(ERROR);
-      }
-      if (InspIRCd() == ERROR)
-      {
-	  printf("ERROR: could not initialise. Shutting down.\n");
-	  Exit(ERROR);
-      }
-  Exit(TRUE);
-  return (0);
-}
-
-int InitConfig (void)
-{
-  FILE *input;
-  char configToken[MAXBUF];
-  if ((ConfigTokenRetrieve("ServerName", configToken)) == FALSE)
-  {
-    printf("ERROR: Missing ListenPorts directive\n");
-    return (ERROR);
-  }
-  strcpy(ServerName,configToken);
-  printf("Server: %s\n",ServerName);
-  return (TRUE);
+	Start();
+	if (!CheckConfig())
+	{
+		printf("ERROR: Your config file is missing, this IRCd will self destruct in 10 seconds :p\n");
+		Exit(ERROR);
+	}
+	if (InspIRCd() == ERROR)
+	{
+		printf("ERROR: could not initialise. Shutting down.\n");
+		Exit(ERROR);
+	}
+	Exit(TRUE);
+	return 0;
 }
 
 
@@ -1247,6 +1244,7 @@ void AddClient(int socket, char* host)
 	for (i = 0; i<=MAXCLIENTS; i++)
 	{
 		if (clientlist[i].fd == 0) {
+			memset(&clientlist[i],0,sizeof(&clientlist[i]));
 			clientlist[i].fd = socket;
 			strcpy(clientlist[i].host, host);
 			strcpy(clientlist[i].dhost, host);
@@ -1648,6 +1646,10 @@ void handle_nick(char **parameters, int pcnt, struct userrec *user)
 	}
 	else
 	{
+		if (parameters[0][0] == ':')
+		{
+			*parameters[0]++;
+		}
 		if ((Find(parameters[0])) && (Find(parameters[0]) != user))
 		{
 			WriteServ(user->fd,"433 %s %s :Nickname is already in use.",user->nick,parameters[0]);
@@ -1769,8 +1771,16 @@ void process_command(struct userrec *user, char* cmd)
 						cmd_found = 1;
 						break;
 					}
-
-					cmdlist[i].handler_function(command_p,items,user);
+					if ((user->registered == 7) || (!strcmp(command,"USER")) || (!strcmp(command,"NICK")) || (!strcmp(command,"PASS")))
+					{
+						cmdlist[i].handler_function(command_p,items,user);
+					}
+					else
+					{
+						WriteServ(user->fd,"451 %s :You have not registered",command);
+						cmd_found=1;
+						break;
+					}
 				}
 				cmd_found = 1;
 			}
@@ -1916,18 +1926,18 @@ int InspIRCd(void)
   memset(clientlist, 0, sizeof(clientlist));
   memset(chanlist,0,sizeof(chanlist));
 
-  ConfigTokenRetrieve("ServerName", ServerName);
-  ConfigTokenRetrieve("ServerDesc", ServerDesc);
-  ConfigTokenRetrieve("Network", Network);
-  ConfigTokenRetrieve("AdminName", AdminName);
-  ConfigTokenRetrieve("AdminEmail", AdminEmail);
-  ConfigTokenRetrieve("AdminNick", AdminNick);
-  ConfigTokenRetrieve("MOTDPath", motd);
-  ConfigTokenRetrieve("RULESPath", rules);
-  ConfigTokenRetrieve("PrefixQuit", PrefixQuit);
-  if ((ConfigTokenRetrieve ("ListenPorts", configToken)) == FALSE)
+  ConfValue("server","name",0,ServerName);
+  ConfValue("server","description",0,ServerDesc);
+  ConfValue("server","network",0,Network);
+  ConfValue("admin","name",0,AdminName);
+  ConfValue("admin","email",0,AdminEmail);
+  ConfValue("admin","nick",0,AdminNick);
+  ConfValue("files","motd",0,motd);
+  ConfValue("files", "rules",0,rules);
+  ConfValue("options","prefixquit",0,PrefixQuit);
+  if ((ConfValue("server","port",0,configToken)) == FALSE)
   {
-    printf("ERROR: Missing ListenPorts directive\n");
+    printf("ERROR: Missing ports from server directive\n");
     return (ERROR);
   }
 

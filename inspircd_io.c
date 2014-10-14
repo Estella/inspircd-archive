@@ -78,63 +78,184 @@ return(TRUE);
 }
 
 
+/* Counts the number of tags of a certain type within the config file, e.g. to enumerate opers */
 
-int ConfigTokenRetrieve (char *token, char *configToken)
+int ConfValueEnum(char* tag)
 {
-  FILE *config;
-  char buffer[MAXBUF], tokenBuffer[MAXBUF];
-  int count = 0;
+	FILE *config;
+	int ptr = 0;
+	char buffer[MAXBUF], c_tag[MAXBUF], c;
+	int in_token, in_quotes, tptr, j, idx = 0;
+	char* key;
 
-  if ((config = fopen (CONFIG_FILE, "r")) == NULL)
-    {
-      printf("ERROR: Cannot open config file: %s.\n", CONFIG_FILE);
-      return (ERROR);
-    }
-  else
-    {
-      while ((fgets (buffer, MAXBUF, config)) != NULL)
+	if ((config = fopen (CONFIG_FILE, "r")) == NULL)
 	{
-	  /* this skips comments */
-	  if (buffer[0] != '#')
-	    {
-	      /* search for the token and make sure the trailing character */
-	      /* is a " " or "=" to make sure the entire token was found */
-	      if ((strstr (buffer, token) != (char) NULL) && 
-		   ((buffer[strlen(token)] == '=') || (buffer[strlen(token)] == ' '))) 
-		{		/* cut off the '=' and send it back */
-		  if (strstr (buffer, "\"") == (char) NULL)
-		    {
-		      printf("Quotes missing from %s token. Option skipped\n", token);
-		      fclose (config);
-		      return (FALSE);
-		    }
-
-		  SafeStrncpy (tokenBuffer, strstr (buffer, "\"") + 1, MAXBUF);
-
-		  /* strip off unprintables/linefeeds (if any) */
-		  count = 0;
-		  while (count < MAXBUF - 1)
-		    {
-		      if ((isprint (tokenBuffer[count])) && tokenBuffer[count] != '"')
-			configToken[count] = tokenBuffer[count];
-		      else
-			{
-			  configToken[count] = '\0';
-			  break;
-			}
-		      count++;
-		    }
-
-		  configToken[MAXBUF - 1] = '\0';
-		  fclose (config);
-		  return (TRUE);
-		}
-	    }
+		return 0;
 	}
-      fclose (config);
-      return (FALSE);
-    }
+	else
+	{
+		ptr = 0;
+		in_token = 0;
+		in_quotes = 0;
+		while (!feof(config))
+		{
+			c = fgetc(config);
+			if ((c == '<') && (!in_quotes))
+			{
+				tptr = 0;
+				in_token = 1;
+				do {
+					c = fgetc(config);
+					if (c != ' ')
+					{
+						c_tag[tptr++] = c;
+						c_tag[tptr] = '\0';
+					}
+				} while (c != ' ');
+			}
+			if (c == '"')
+			{
+				in_quotes = (!in_quotes);
+			}
+			if ((c == '>') && (!in_quotes))
+			{
+				in_token = 0;
+				if (!strcmp(c_tag,tag))
+				{
+					/* correct tag, but wrong index */
+					idx++;
+				}
+				c_tag[0] = '\0';
+				buffer[0] = '\0';
+				ptr = 0;
+				tptr = 0;
+			}
+			if (c != '>')
+			{
+				if ((in_token) && (c != '\n') && (c != '\r'))
+				{
+					buffer[ptr++] = c;
+					buffer[ptr] = '\0';
+				}
+			}
+		}
+	}
+	fclose(config);
+	return idx;
+}
 
+
+
+
+
+/* Retrieves a value from the config file. If there is more than one value of the specified
+ * key and section (e.g. for opers etc) then the index value specifies which to retreive, e.g.
+ *
+ * ConfValue("oper","name",2,result);
+ */
+
+int ConfValue(char* tag, char* var, int index, char *result)
+{
+	FILE *config;
+	int ptr = 0;
+	char buffer[MAXBUF], c_tag[MAXBUF], c;
+	int in_token, in_quotes, tptr, j, idx = 0;
+	char* key;
+
+	if ((config = fopen (CONFIG_FILE, "r")) == NULL)
+	{
+		return 0;
+	}
+	else
+	{
+		ptr = 0;
+		in_token = 0;
+		in_quotes = 0;
+		while (!feof(config))
+		{
+			c = fgetc(config);
+			if ((c == '<') && (!in_quotes))
+			{
+				tptr = 0;
+				in_token = 1;
+				do {
+					c = fgetc(config);
+					if (c != ' ')
+					{
+						c_tag[tptr++] = c;
+						c_tag[tptr] = '\0';
+					}
+				} while (c != ' ');
+			}
+			if (c == '"')
+			{
+				in_quotes = (!in_quotes);
+			}
+			if ((c == '>') && (!in_quotes))
+			{
+				in_token = 0;
+				if (idx == index)
+				{
+					if (!strcmp(c_tag,tag))
+					{
+						if ((buffer) && (c_tag) && (var))
+						{
+							key = strstr(buffer,var);
+							if (!key)
+							{
+								/* value not found in tag */
+								fclose(config);
+								return 0;
+							}
+							else
+							{
+								key+=strlen(var);
+								while (key[0] !='"')
+								{
+									if (!strlen(key))
+									{
+										/* missing quote */
+										return 0;
+									}
+									key++;
+								}
+								key++;
+								for (j = 0; j < strlen(key); j++)
+								{
+									if (key[j] == '"')
+									{
+										key[j] = '\0';
+									}
+								}
+								fclose(config);
+								strcpy(result,key);
+								return 1;
+							}
+						}
+					}
+				}
+				if (!strcmp(c_tag,tag))
+				{
+					/* correct tag, but wrong index */
+					idx++;
+				}
+				c_tag[0] = '\0';
+				buffer[0] = '\0';
+				ptr = 0;
+				tptr = 0;
+			}
+			if (c != '>')
+			{
+				if ((in_token) && (c != '\n') && (c != '\r'))
+				{
+					buffer[ptr++] = c;
+					buffer[ptr] = '\0';
+				}
+			}
+		}
+	}
+	fclose(config);
+	return 0;
 }
 
 
@@ -166,21 +287,5 @@ int OpenTCPSocket (void)
     return (ERROR);
   else
     return (sockfd);
-}
-
-
-/* This function checks a config variable for a numerical flag and returns it */
-int CheckFlag (char *flagName)
-{
-  char configToken[MAXBUF];
-
-  if ((ConfigTokenRetrieve (flagName, configToken)) == TRUE)
-  {
-    return (atoi(configToken));
-  }
-  else
-  {
-    return (FALSE);
-  }
 }
 
