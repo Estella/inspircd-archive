@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 clear
 echo "Welcome to the InspIRCd Configuration program!"
 echo ""
@@ -10,7 +10,8 @@ echo "*** for the proper values to use, or server links will be unstable! ***"
 echo ""
 echo "Press <RETURN> to accept the default for any option, or enter a new value."
 echo ""
-echo "Please note: You will *HAVE* to read the docs dir, otherwise you won't have a config file!"
+echo "Please note: You will *HAVE* to read the docs dir, otherwise you won't have"
+echo "a config file!"
 echo ""
 
 ME=`pwd`
@@ -98,18 +99,6 @@ fi
 
 ###############################################################################
 
-TEST=10000
-echo "" 
-echo "Maximum number of channels on the network (hard limit)? ($TEST)" 
-read cc 
-if [ -z "$cc" ] ; then 
-   MAXCHAN=$TEST
-else 
-   MAXCHAN=$cc
-fi
-
-###############################################################################
-
 TEST=256
 echo "" 
 echo "Maximum number of channels modes in a channels mode string? ($TEST)" 
@@ -130,7 +119,6 @@ echo "Module path:         $MODPATH"
 echo "Max connections:     $MAXCLIENTS"
 echo "Max nickname length: $NICKMAX"
 echo "Max channel length:  $CHANMAX"
-echo "Channel hard limit:  $MAXCHAN"
 echo "Max mode length:     $MAXMODES"
 echo ""
 echo "Writing inspircd_config.h ..."
@@ -141,13 +129,15 @@ echo "#define SYSLOG_FACILITY LOG_DAEMON" >>inspircd_config.h
 echo "#define SYSLOG_LEVEL LOG_NOTICE" >>inspircd_config.h
 echo "#define CONFIG_FILE \"$INSTALLPATH\"" >>inspircd_config.h
 echo "#define MOD_PATH \"$MODPATH\"" >>inspircd_config.h
-echo "#define VERSION \"`./version.sh`\"" >>inspircd_config.h
+echo "#define VERSION \"`sh ./version.sh`\"" >>inspircd_config.h
 echo "#define MAXCLIENTS $MAXCLIENTS" >>inspircd_config.h
 echo "#define NICKMAX $NICKMAX" >>inspircd_config.h
 echo "#define CHANMAX $CHANMAX" >>inspircd_config.h
 echo "#define MAXCHANS $MAXCHANS" >>inspircd_config.h
-echo "#define MAXCHAN $MAXCHAN" >>inspircd_config.h
 echo "#define MAXMODES $MAXMODES" >>inspircd_config.h
+echo "#define SYSTEM \"`uname -n -s -r`\"" >>inspircd_config.h
+echo "#define MAXBUF 10240">>inspircd_config.h
+echo "$MODPATH">.modpath
 
 touch inspircd_config.h
 rm -rf *.o
@@ -158,4 +148,3 @@ echo "To build your server with these settings, please type 'make' now."
 echo ""
 echo "*** Remember to edit your configuration files!!! ***"
 echo ""
-

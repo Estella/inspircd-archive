@@ -1,0 +1,170 @@
+Writing modules for InspIRCd
+----------------------------
+
+Modules in inspircd are based on a "class factory" system. Basically, a plugin is a shared object (.so) file, 
+which is loaded either on startup, on rehash, or by /loadmod (as server admin). When a module is loaded, several 
+things occur. Firstly, the OS loads the shared object into memory, then InspIRCd will search for the entry point 
+"init_module". If it exists, it will be called, and is expected to return a pointer to a class (created using 
+'new'). The class which is returned must be inherited from the 'ModuleFactory' class. This class contains a method 
+'CreateModule', which returns a pointer to a class (also created using 'new') which must be inherited from the 
+class 'Module'. This class contains your actual code. The main core of the ircd will push your class onto a vector 
+of loaded modules, and will call specified methods in your class when events occur. Note that it is possible to 
+just return a pointer to a plain "Module" class from your factory object, but this is somewhat pointless as it 
+would create a dummy module class which as default does nothing.
+
+For a working simple example, see the example module 'm_foobar.cpp'.
+
+Functions etc
+-------------
+
+The following functions, classes, types and structs are exported from the core for your convenience. You may use 
+them to produce output from your plugin, and check and modify internal structures.
+
+
+void WriteOpers(char* text, ...);
+
+This function will send text to all opers on the local server. Its parameters are identical to printf.
+Example:
+WriteOpers("Failed command by %s",nick);
+
+
+void debug(char *text, ...);
+
+This function will send text to the debug log. Its parameters are identical to printf.
+Example:
+debug("arrrrrrg im dyyyyying because of %s!",reason);
+
+
+void Write(int sock,char *text, ...);
+
+This function sends text to an open TCP socket. It is recommended you only use this function to send data to users 
+using their "fd" value, however it is not limited to only these descriptors. A linefeed and carriage return will 
+be added to the end of the string, and it will be truncated to 512 bytes, including the CR+LF pair.
+Example:
+Write(user->fd,"PRIVMSG %s :erk!",user->nick);
+
+
+void WriteServ(int sock, char* text, ...);
+
+This function writes text to an open TCP socket. It is recommended you only use this function to send data to 
+users using their "fd" value, however it is not limited to only these descriptors. A linefeed and carriage return 
+will be added to the end of the string, and it will be truncated to 512 bytes, including the CR+LF pair. the 
+server name of the local server will be prepended to the string with a leading ":" character, making this function 
+ideal for numerics or server notices etc.
+Example:
+WriteServ(user->fd,"666 %s %s :User can't eat pie!",user->nick,some_target);
+
+
+void WriteFrom(int sock, struct userrec *user,char* text, ...);
+
+This function writes text from one user to another. It will extract the nick, ident and host information from the 
+*user parameter, and prepend it in the correct format to the message, then send it down the open socket specified 
+in the "sock" parameter. If the user specified does not exist (e.g. the pointer is invalid), the function will 
+silently fail.A linefeed and carriage return will be added to the end of the string, and it will be truncated to 
+512 bytes, including the CR+LF pair.
+Example:
+WriteFrom(target_user->fd,source_user,"PRIVMSG %s :weebl!",source_user->nick);
+
+
+void WriteTo(struct userrec *source, struct userrec *dest,char *data, ...);
+
+This function writes text from one user to another using a pair of userrec structures. It is similar to the method 
+shown above, but as it takes a userrec as its target and not a socket descriptor, it can only be used to send to 
+valid users known to the system. It will extract the nick, ident and host information from the *user parameter, 
+and prepend it in the correct format to the message, then send it down the open socket specified in the "sock" 
+parameter. If the user specified does not exist (e.g. the pointer is invalid), the function will silently fail.A 
+linefeed and carriage return will be added to the end of the string, and it will be truncated to 512 bytes, 
+including the CR+LF pair.
+Example:
+WriteTo(source_user,target_user,"PRIVMSG %s :Weebl!",source_user->nick);
+
+
+void WriteChannel(struct chanrec* Ptr, struct userrec* user, char* text, ...);
+
+This function writes a line to a channel pointed to by the "Ptr" parameter. All users in the channel receive the 
+data, as would be produced by for example a MODE command, as this *includes* the source user (provided in the 
+"user" parameter). As with all other functions, text is automatically cleaned and chopped to 512 bytes with 
+carriage returns and linefeeds.
+Example:
+WriteChannel(dstchannel,srcuser,"TOPIC %s :Weebls wobble but they dont fall down!",dstchannel->name);
+
+
+void ChanExceptSender(struct chanrec* Ptr, struct userrec* user, char* text, ...);
+
+This function writes a line to a channel pointed to by the "Ptr" parameter. All users in the channel receive the
+data, as would be produced by for example a PRIVMSG command, as this *DOES NOT INCLUDE* the source user 
+(provided in the "user" parameter). As with all other functions, text is automatically cleaned and chopped to 512 
+bytes with carriage returns and linefeeds.
+Example:
+WriteChannel(dstchannel,srcuser,"PRIVMSG %s :%s cant see this ;)",dstchannel->name,srcuser->nick);
+
+
+int common_channels(struct userrec *u, struct userrec *u2);
+
+This function returns a nonzero result if both users you pass to it share at least one common channel. This is the 
+same function used by the QUIT and NICK commands in the core.
+Example:
+if (common_channels(myuser1,myuser2)) { ..... }
+
+
+void WriteCommon(struct userrec *u, char* text, ...);
+
+This function writes a line to all users that share a channel with the user "u". It is used in the core by 
+commands that have this (somewhat rare) functionality, such as NICK. As with all other functions, text is 
+automatically cleaned and chopped to 512 bytes with carriage returns and linefeeds.
+Example:
+WriteCommon(myuser,"QUIT %s :rehashing",some_pseudo_client);
+
+
+void WriteCommonExcept(struct userrec *u, char* text, ...);
+
+This function writes a line to all users that share a channel with the user "u", except for the user "u" 
+themselves. It is used in the core by commands that have this (somewhat rare) functionality, such as QUIT. As with all
+other functions, text is automatically cleaned and chopped to 512 bytes with carriage returns and linefeeds.
+Example:
+WriteCommon(myuser,"QUIT %s :rehashing",some_pseudo_client);
+
+
+void WriteWallOps(struct userrec *source, char* text, ...);
+
+This function sends a WALLOPS command from user "source". As with all other functions, text is automatically 
+cleaned and chopped to 512 bytes with carriage returns and linefeeds.
+Example:
+WriteWallOps(some_oper,"Hey there opers! I'm %s...",some_oper->nick);
+
+
+int isnick(char *n);
+
+This function returns a nonzero value if the nickname you pass to it is valid. It will automatically check via all 
+known rules specified in the RFC. Also if the pointer is null, an the nick is an empty string, or longer than 
+NICKMAX, the function will return 0.
+Example:
+if (isnick("123-Invalid-Nick")) { debug("You'll never see this!"); }
+
+struct userrec* Find(string nick);
+
+This function attempts to search for the user you specify in the "nick" parameter. If the search is successful, a 
+valid userrec structure containing their information is returned, otherwise the function will return NULL.
+Example:
+if (Find("Brain")) { WriteWallops(Find("Brain"),"brain is online!!!"); }
+
+
+struct chanrec* FindChan(char* chan);
+
+This function attempts to search for the channel you specify in the "chan" parameter. If the search is successful, 
+a valid chanrec structure containing the information of the channel is returned, otherwise the function will 
+return NULL.
+Example:
+if (FindChan("#UnrealIRCd")) { Exit(0); /* *grin* */  }
+
+
+char* cmode(struct userrec *user, struct chanrec *chan);
+
+This function returns the mode of a user upon a channel, for example channel operator, half operator or voiced. It 
+will return a string containing either "@", "%" or "+" respectively for each, or an empty string (not NULL). You 
+must pass it a valid user structure and channel structure for it to check against.
+Example:
+if (!strcmp(cmode(myuser,mychan),"@")) { debug("looky looky! i found an op! :D");
+
+
+NB: Definitions for userrec and chanrec structures can be found in users.cpp and channels.cpp respectively.

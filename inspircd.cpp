@@ -2,7 +2,7 @@
  *       | Inspire Internet Relay Chat Daemon |
  *       +------------------------------------+
  *
- *    Inspire is copyright (C) 2002 ChatSpike-Dev.
+ *  Inspire is copyright (C) 2002-2003 ChatSpike-Dev.
  *                       E-mail:
  *                <brain@chatspike.net>
  *           	  <Craig@chatspike.net>
@@ -10,7 +10,70 @@
  * Written by Craig Edwards, Craig McLure, and others.
  * This program is free but copyrighted software; see
  *            the file COPYING for details.
+ *
+ * ---------------------------------------------------
+ 
+ $Log: inspircd.cpp,v $
+ Revision 1.24  2003/01/11 19:00:10  brain
+ Added /USERHOST command
+
+ Revision 1.23  2003/01/11 17:57:28  brain
+ Added '/STATS O'
+ Added more module error checking
+
+ Revision 1.22  2003/01/11 00:48:44  brain
+ removed random debug output
+
+ Revision 1.21  2003/01/11 00:06:46  brain
+ Fixed random crash on nickchange
+ Fine tuned ability to handle >300 users
+
+ Revision 1.20  2003/01/09 22:24:59  brain
+ added '/stats L' (connect-info)
+
+ Revision 1.19  2003/01/09 21:38:51  brain
+ '/stats u' support added (server uptime)
+
+ Revision 1.18  2003/01/09 21:09:50  brain
+ added '/stats M' command
+
+ Revision 1.17  2003/01/08 22:11:38  brain
+
+ Added extra dynamic module support, new methods to Module class
+
+ Revision 1.16  2003/01/08 17:48:48  brain
+
+ fixed "user lingering" problem in kill_link
+
+ Revision 1.15  2003/01/07 23:17:51  brain
+
+ Fixed wallops and command parameter counting bugs
+
+ Revision 1.14  2003/01/07 20:47:34  brain
+
+ Fixes random crash on nickchange (must keep classfactory pointers!)
+
+ Revision 1.13  2003/01/07 19:57:56  brain
+
+ Dynamix module support, preliminary release
+
+ Revision 1.12  2003/01/07 01:01:30  brain
+
+ Changed command table to a vector of command_t types
+
+ Revision 1.11  2003/01/06 23:43:30  brain
+
+ extra debug output
+
+ Revision 1.10  2003/01/06 23:38:29  brain
+
+ just playing with header tags
+
+
+ * ---------------------------------------------------
  */
+
+/* Now with added unF! ;) */
 
 #include "inspircd.h"
 #include "inspircd_io.h"
@@ -21,10 +84,19 @@
 #include <sys/errno.h>
 #include <sys/ioctl.h>
 #include <sys/utsname.h>
-#include <string.h>
-#include <stdio.h>
+#include <cstdio>
 #include <time.h>
+#include <string>
+#include <hash_map.h>
+#include <sstream>
+#include <vector>
 #include "users.h"
+#include "ctables.h"
+#include "globals.h"
+#include "modules.h"
+#include "dynamic.h"
+
+using namespace std;
 
 char ServerName[MAXBUF];
 char Network[MAXBUF];
@@ -32,34 +104,66 @@ char ServerDesc[MAXBUF];
 char AdminName[MAXBUF];
 char AdminEmail[MAXBUF];
 char AdminNick[MAXBUF];
+char diepass[MAXBUF];
+char restartpass[MAXBUF];
 char motd[MAXBUF];
 char rules[MAXBUF];
 char list[MAXBUF];
 char PrefixQuit[MAXBUF];
+char DieValue[MAXBUF];
+int debugging = 0;
+int MODCOUNT = -1;
+time_t startup_time = 0;
 
-struct userrec clientlist[MAXCLIENTS];
-struct chanrec chanlist[MAXCHAN];
-char bannerBuffer[MAXBUF];
 
-int MAXCOMMAND;
+namespace std
+{
+	template<> struct hash<string>
+	{
+		size_t operator()(const string &s) const
+		{
+			char a[MAXBUF];
+			static struct hash<const char *> strhash;
+			strcpy(a,s.c_str());
+			strlower(a);
+			return strhash(a);
+		}
+	};
+}
 
-/* command callback, all commands define one of these (they can
- * be inside external module files */
 
-typedef void (handlerfunc) (char**, int, struct userrec*);
+struct StrHashComp
+{
 
-/* a structure that defines a command */
+	bool operator()(const string& s1, const string& s2) const
+	{
+		char a[MAXBUF],b[MAXBUF];
+		strcpy(a,s1.c_str());
+		strcpy(b,s2.c_str());
+		return (strcasecmp(a,b) == 0);
+	}
 
-struct command_t {
-	char command[MAXBUF]; /* command name */
-	handlerfunc *handler_function; /* handler function as in typedef */
-	char flags_needed; /* user flags needed to execute the command or 0 */
-	int min_params; /* minimum number of parameters command takes */
 };
 
-/* list of commands supported by the ircd */
+typedef hash_map<string, userrec*, hash<string>, StrHashComp> user_hash;
+typedef hash_map<string, chanrec*, hash<string>, StrHashComp> chan_hash;
+typedef vector<command_t> command_table;
+typedef DLLFactory<ModuleFactory> ircd_module;
 
-struct command_t cmdlist[255];
+user_hash clientlist;
+chan_hash chanlist;
+command_table cmdlist;
+vector<Module*> modules(255);
+vector<ircd_module*> factory(255);
+
+struct linger linger = { 0 };
+char bannerBuffer[MAXBUF];
+
+/* prototypes */
+
+int has_channel(struct userrec *u, struct chanrec *c);
+int usercount(struct chanrec *c);
+void update_stats_l(int fd,int data_out);
 
 /* chop a string down to 512 characters and preserve linefeed (irc max
  * line length) */
@@ -75,39 +179,92 @@ void chop(char* str)
 }
 
 
-void debug(char *text, ...)
+extern "C" void debug(char *text, ...)
 {
   char textbuffer[MAXBUF];
   va_list argsPtr;
   FILE *f;
 
-  f = fopen("ircd.log","a+");
-  if (f)
+  if (debugging)
   {
-	  va_start (argsPtr, text);
-	  vsnprintf(textbuffer, MAXBUF, text, argsPtr);
-	  va_end(argsPtr);
-	  fprintf(f,"%s\n",textbuffer);
-	  fclose(f);
+	  f = fopen("ircd.log","a+");
+	  if (f)
+	  {
+		  va_start (argsPtr, text);
+		  vsnprintf(textbuffer, MAXBUF, text, argsPtr);
+		  va_end(argsPtr);
+		  fprintf(f,"%s\n",textbuffer);
+		  fclose(f);
+	  }
+	  else
+	  {
+		  printf("Can't write log file, bailing!!!");
+		  Exit(ERROR);
+	  }
   }
-  else
+}
+
+void ReadConfig(void)
+{
+  char dbg[MAXBUF];
+  ConfValue("server","name",0,ServerName);
+  ConfValue("server","description",0,ServerDesc);
+  ConfValue("server","network",0,Network);
+  ConfValue("admin","name",0,AdminName);
+  ConfValue("admin","email",0,AdminEmail);
+  ConfValue("admin","nick",0,AdminNick);
+  ConfValue("files","motd",0,motd);
+  ConfValue("files", "rules",0,rules);
+  ConfValue("power", "diepass",0,diepass);
+  ConfValue("power", "restartpass",0,restartpass);
+  ConfValue("options","prefixquit",0,PrefixQuit);
+  ConfValue("die", "value",0,DieValue);
+  ConfValue("options","debug",0,dbg);
+  debugging = 0;
+  if (!strcmp(dbg,"on"))
   {
-	  printf("Can't write log file, bailing!!!");
-	  Exit(ERROR);
+	  debugging = 1;
   }
 }
 
 void Blocking(int s)
 {
   int flags;
-  debug("Blocking: %d",socket);
+  debug("Blocking: %d",s);
   flags = fcntl(s, F_GETFL, 0);
   fcntl(s, F_SETFL, flags ^ O_NONBLOCK);
 }
 
+void NonBlocking(int s)
+{
+  int flags;
+  debug("NonBlocking: %d",s);
+  flags = fcntl(s, F_GETFL, 0);
+  fcntl(s, F_SETFL, flags | O_NONBLOCK);
+}
+
+
+int CleanAndResolve (char *resolvedHost, const char *unresolvedHost)
+{
+  struct hostent *hostPtr = NULL;
+  struct in_addr addr;
+
+  memset (resolvedHost, '\0',MAXBUF);
+  if(unresolvedHost == NULL)
+	return(ERROR);
+  if ((inet_aton(unresolvedHost,&addr)) == 0)
+	return(ERROR);
+  hostPtr = gethostbyaddr ((char *)&addr.s_addr,sizeof(addr.s_addr),AF_INET);
+  if (hostPtr != NULL)
+  	snprintf(resolvedHost,MAXBUF,"%s",hostPtr->h_name);
+  else
+  	snprintf(resolvedHost,MAXBUF,"%s",unresolvedHost);
+  return (TRUE);
+}
+
 /* write formatted text to a socket, in same format as printf */
 
-void Write(int sock,char *text, ...)
+extern "C" void Write(int sock,char *text, ...)
 {
   char textbuffer[MAXBUF];
   va_list argsPtr;
@@ -123,11 +280,12 @@ void Write(int sock,char *text, ...)
   sprintf(tb,"%s\r\n",textbuffer);
   chop(tb);
   write(sock,tb,strlen(tb));
+  update_stats_l(sock,strlen(tb)); /* add one line-out to stats L for this fd */
 }
 
 /* write a server formatted numeric response to a single socket */
 
-void WriteServ(int sock, char* text, ...)
+extern "C" void WriteServ(int sock, char* text, ...)
 {
   char textbuffer[MAXBUF],tb[MAXBUF];
   va_list argsPtr;
@@ -143,11 +301,12 @@ void WriteServ(int sock, char* text, ...)
   chop(tb);
   debug("WriteServ: %d %s",sock,tb);
   write(sock,tb,strlen(tb));
+  update_stats_l(sock,strlen(tb)); /* add one line-out to stats L for this fd */
 }
 
 /* write text from an originating user to originating user */
 
-void WriteFrom(int sock, struct userrec *user,char* text, ...)
+extern "C" void WriteFrom(int sock, struct userrec *user,char* text, ...)
 {
   char textbuffer[MAXBUF],tb[MAXBUF];
   va_list argsPtr;
@@ -163,11 +322,12 @@ void WriteFrom(int sock, struct userrec *user,char* text, ...)
   chop(tb);
   debug("WriteFrom: %d %s",sock,tb);
   write(sock,tb,strlen(tb));
+  update_stats_l(sock,strlen(tb)); /* add one line-out to stats L for this fd */
 }
 
 /* write text to an destination user from a source user (e.g. user privmsg) */
 
-void WriteTo(struct userrec *source, struct userrec *dest,char *data, ...)
+extern "C" void WriteTo(struct userrec *source, struct userrec *dest,char *data, ...)
 {
 	char textbuffer[MAXBUF],tb[MAXBUF];
 	va_list argsPtr;
@@ -185,19 +345,18 @@ void WriteTo(struct userrec *source, struct userrec *dest,char *data, ...)
 /* write formatted text from a source user to all users on a channel
  * including the sender (NOT for privmsg, notice etc!) */
 
-void WriteChannel(struct chanrec* Ptr, struct userrec* user, char* text, ...)
+extern "C" void WriteChannel(struct chanrec* Ptr, struct userrec* user, char* text, ...)
 {
 	char textbuffer[MAXBUF];
-	int i = 0;
 	va_list argsPtr;
 	va_start (argsPtr, text);
 	vsnprintf(textbuffer, MAXBUF, text, argsPtr);
 	va_end(argsPtr);
-	for (i = 0; i <= MAXCLIENTS; i++)
+	for (user_hash::const_iterator i = clientlist.begin(); i != clientlist.end(); i++)
 	{
-		if (has_channel(&clientlist[i],Ptr) && (&clientlist[i].fd != 0))
+		if (has_channel(i->second,Ptr) && (i->second->fd != 0))
 		{
-			WriteTo(user,&clientlist[i],"%s",textbuffer);
+			WriteTo(user,i->second,"%s",textbuffer);
 		}
 	}
 }
@@ -205,19 +364,19 @@ void WriteChannel(struct chanrec* Ptr, struct userrec* user, char* text, ...)
 /* write formatted text from a source user to all users on a channel except
  * for the sender (for privmsg etc) */
 
-void ChanExceptSender(struct chanrec* Ptr, struct userrec* user, char* text, ...)
+extern "C" void ChanExceptSender(struct chanrec* Ptr, struct userrec* user, char* text, ...)
 {
 	char textbuffer[MAXBUF];
-	int i = 0;
 	va_list argsPtr;
 	va_start (argsPtr, text);
 	vsnprintf(textbuffer, MAXBUF, text, argsPtr);
 	va_end(argsPtr);
-	for (i = 0; i <= MAXCLIENTS; i++)
+
+	for (user_hash::const_iterator i = clientlist.begin(); i != clientlist.end(); i++)
 	{
-		if (has_channel(&clientlist[i],Ptr) && (&clientlist[i].fd != 0) && (user != &clientlist[i]))
+		if (has_channel(i->second,Ptr) && (i->second->fd != 0) && (user != i->second))
 		{
-			WriteTo(user,&clientlist[i],"%s",textbuffer);
+			WriteTo(user,i->second,"%s",textbuffer);
 		}
 	}
 }
@@ -225,7 +384,7 @@ void ChanExceptSender(struct chanrec* Ptr, struct userrec* user, char* text, ...
 /* return 0 or 1 depending if users u and u2 share one or more common channels
  * (used by QUIT, NICK etc which arent channel specific notices) */
 
-int common_channels(struct userrec *u, struct userrec *u2)
+extern "C" int common_channels(struct userrec *u, struct userrec *u2)
 {
 	int i = 0;
 	int z = 0;
@@ -238,7 +397,7 @@ int common_channels(struct userrec *u, struct userrec *u2)
 	{
 		for (z = 0; z <= MAXCHANS; z++)
 		{
-			if ((u->chans[i].channel == u2->chans[z].channel) && (u->chans[i].channel) && (u2->chans[z].channel))
+			if ((u->chans[i].channel == u2->chans[z].channel) && (u->chans[i].channel) && (u2->chans[z].channel) && (u->registered == 7) && (u2->registered == 7))
 			{
 				return 1;
 			}
@@ -250,9 +409,8 @@ int common_channels(struct userrec *u, struct userrec *u2)
 /* write a formatted string to all users who share at least one common
  * channel, including the source user e.g. for use in NICK */
 
-void WriteCommon(struct userrec *u, char* text, ...)
+extern "C" void WriteCommon(struct userrec *u, char* text, ...)
 {
-	int i = 0;
 	char textbuffer[MAXBUF];
 	va_list argsPtr;
 	va_start (argsPtr, text);
@@ -261,11 +419,11 @@ void WriteCommon(struct userrec *u, char* text, ...)
 
 	WriteFrom(u->fd,u,"%s",textbuffer);
 
-	for (i = 0; i <= MAXCLIENTS; i++)
+	for (user_hash::const_iterator i = clientlist.begin(); i != clientlist.end(); i++)
 	{
-		if (common_channels(u,&clientlist[i]))
+		if (common_channels(u,i->second) && (i->second->fd) && (i->second != u))
 		{
-			WriteFrom(clientlist[i].fd,u,"%s",textbuffer);
+			WriteFrom(i->second->fd,u,"%s",textbuffer);
 		}
 	}
 }
@@ -273,46 +431,57 @@ void WriteCommon(struct userrec *u, char* text, ...)
 /* write a formatted string to all users who share at least one common
  * channel, NOT including the source user e.g. for use in QUIT */
 
-void WriteCommonExcept(struct userrec *u, char* text, ...)
+extern "C" void WriteCommonExcept(struct userrec *u, char* text, ...)
 {
-	int i = 0;
 	char textbuffer[MAXBUF];
 	va_list argsPtr;
 	va_start (argsPtr, text);
 	vsnprintf(textbuffer, MAXBUF, text, argsPtr);
 	va_end(argsPtr);
 
-	WriteFrom(u->fd,u,"%s",textbuffer);
-
-	for (i = 0; i <= MAXCLIENTS; i++)
+	for (user_hash::const_iterator i = clientlist.begin(); i != clientlist.end(); i++)
 	{
-		if ((common_channels(u,&clientlist[i])) && (u != &clientlist[i]))
+		if ((common_channels(u,i->second)) && (u != i->second))
 		{
-			WriteFrom(clientlist[i].fd,u,"%s",textbuffer);
+			WriteFrom(i->second->fd,u,"%s",textbuffer);
 		}
 	}
 }
 
-void WriteOpers(char* text, ...)
+extern "C" void WriteOpers(char* text, ...)
 {
-	int i = 0;
 	char textbuffer[MAXBUF];
 	va_list argsPtr;
 	va_start (argsPtr, text);
 	vsnprintf(textbuffer, MAXBUF, text, argsPtr);
 	va_end(argsPtr);
 
-
-	for (i = 0; i <= MAXCLIENTS; i++)
+	for (user_hash::const_iterator i = clientlist.begin(); i != clientlist.end(); i++)
 	{
-		if ((clientlist[i].fd) && (strstr(clientlist[i].modes,"o")))
+		if ((i->second->fd) && (strstr(i->second->modes,"o")))
 		{
-			WriteServ(clientlist[i].fd,"NOTICE :%s",textbuffer);
+			WriteServ(i->second->fd,"NOTICE %s :%s",i->second->nick,textbuffer);
 		}
 	}
 }
 
-
+extern "C" void WriteWallOps(struct userrec *source, char* text, ...)  
+{  
+        int i = 0;  
+        char textbuffer[MAXBUF];  
+        va_list argsPtr;  
+        va_start (argsPtr, text);  
+        vsnprintf(textbuffer, MAXBUF, text, argsPtr);  
+        va_end(argsPtr);  
+  
+  	for (user_hash::const_iterator i = clientlist.begin(); i != clientlist.end(); i++)
+        {  
+                if ((i->second->fd) && (strstr(i->second->modes,"w")))  
+                {  
+			WriteTo(source,i->second,"WALLOPS %s",textbuffer);
+                }
+	}
+}  
 
 /* convert a string to lowercase. Note following special circumstances
  * taken from RFC 1459. Many "official" server branches still hold to this
@@ -345,9 +514,17 @@ void strlower(char *n)
 
 /* verify that a user's nickname is valid */
 
-int isnick(char *n)
+extern "C" int isnick(char *n)
 {
 	int i = 0;
+	if (!n)
+	{
+		return 0;
+	}
+	if (!strcmp(n,""))
+	{
+		return 0;
+	}
 	if (strlen(n) > NICKMAX-1)
 	{
 		n[NICKMAX-1] = '\0';
@@ -374,55 +551,78 @@ int isnick(char *n)
 
 /* Find a user record by nickname and return a pointer to it */
 
-struct userrec* Find(char* nick)
+extern "C" struct userrec* Find(string nick)
 {
-	struct userrec* Ptr = NULL;
-	int i = 0;
-	char n1[MAXBUF],n2[MAXBUF];
+	user_hash::iterator iter = clientlist.find(nick);
 
-	strcpy(n2,nick);
-	strlower(n2);
-	for (i = 0; i <= MAXCLIENTS; i++)
+	if (iter == clientlist.end())
+		/* Couldn't find it */
+		return NULL;
+
+	return iter->second;
+}
+
+void update_stats_l(int fd,int data_out) /* add one line-out to stats L for this fd */
+{
+	for (user_hash::const_iterator i = clientlist.begin(); i != clientlist.end(); i++)
 	{
-		strcpy(n1,clientlist[i].nick);
-		strlower(n1);
-		if (!strcmp(n1,n2))
+		if ((i->second->fd == fd) && (i->second->fd != 0))
 		{
-			Ptr = &clientlist[i];
-			return Ptr;
+			i->second->bytes_out += data_out;
+			i->second->cmds_out++;
 		}
 	}
-	return NULL;
 }
+
 
 /* find a channel record by channel name and return a pointer to it */
 
-struct chanrec* FindChan(char* chan)
+extern "C" struct chanrec* FindChan(char* chan)
 {
-	struct chanrec* Ptr = NULL;
-	int i = 0;
-	char n1[MAXBUF],n2[MAXBUF];
+	chan_hash::iterator iter = chanlist.find(chan);
 
-	strcpy(n2,chan);
-	strlower(n2);
-	for (i = 0; i <= MAXCHAN; i++)
+	if (iter == chanlist.end())
+		/* Couldn't find it */
+		return NULL;
+
+	return iter->second;
+}
+
+
+void purge_empty_chans(void)
+{
+	int go_again = 1, purge = 0;
+	
+	while (go_again)
 	{
-		strcpy(n1,chanlist[i].name);
-		strlower(n1);
-		if (!strcmp(n1,n2))
+		go_again = 0;
+		for (chan_hash::iterator i = chanlist.begin(); i != chanlist.end(); i++)
 		{
-			Ptr = &chanlist[i];
-			return Ptr;
+			if (i->second) {
+				if (!usercount(i->second))
+				{
+					/* kill the record */
+					if (i != chanlist.end())
+					{
+						debug("del_channel: destroyed: %s",i->second->name);
+						delete i->second;
+						chanlist.erase(i);
+						go_again = 1;
+						purge++;
+						break;
+					}
+				}
+			}
 		}
 	}
-	return NULL;
+	debug("completed channel purge, killed %d",purge);
 }
 
 /* returns the status character for a given user on a channel, e.g. @ for op,
  * % for halfop etc. If the user has several modes set, the highest mode
  * the user has must be returned. */
 
-char* cmode(struct userrec *user, struct chanrec *chan)
+extern "C" char* cmode(struct userrec *user, struct chanrec *chan)
 {
 	int i;
 	for (i = 0; i <= MAXCHANS; i++)
@@ -532,17 +732,15 @@ int cstatus(struct userrec *user, struct chanrec *chan)
 
 char* userlist(struct chanrec *c)
 {
-	int i = 0;
-
 	strcpy(list,"");
-	for (i = MAXCLIENTS; i >= 0; i--)
+  	for (user_hash::const_iterator i = clientlist.begin(); i != clientlist.end(); i++)
 	{
-		if (has_channel(&clientlist[i],c) && (clientlist[i].fd != 0))
+		if (has_channel(i->second,c) && (i->second->fd != 0))
 		{
-			if (strcmp(clientlist[i].nick,""))
+			if (isnick(i->second->nick))
 			{
-				strcat(list,cmode(&clientlist[i],c));
-				strcat(list,clientlist[i].nick);
+				strcat(list,cmode(i->second,c));
+				strcat(list,i->second->nick);
 				strcat(list," ");
 			}
 		}
@@ -559,11 +757,11 @@ int usercount(struct chanrec *c)
 	int count = 0;
 
 	strcpy(list,"");
-	for (i = MAXCLIENTS; i >= 0; i--)
+  	for (user_hash::const_iterator i = clientlist.begin(); i != clientlist.end(); i++)
 	{
-		if (has_channel(&clientlist[i],c) && (clientlist[i].fd != 0))
+		if (has_channel(i->second,c) && (i->second->fd != 0))
 		{
-			if (strcmp(clientlist[i].nick,""))
+			if (isnick(i->second->nick))
 			{
 				count++;
 			}
@@ -595,36 +793,34 @@ struct chanrec* add_channel(struct userrec *user, char* cname, char* key)
 	
 	if ((has_channel(user,FindChan(cname))) && (FindChan(cname)))
 	{
-		return; // already on the channel!
+		return NULL; // already on the channel!
 	}
 	
 	if (!FindChan(cname))
 	{
 		/* create a new one */
 		debug("add_channel: creating: %s",cname);
-		for (i = 0; i <= MAXCHAN ; i++)
 		{
-			if  (chanlist[i].created == 0)
-			{
-				strcpy(chanlist[i].name, cname);
-				chanlist[i].topiclock = 1;
-				chanlist[i].noexternal = 1;
-				chanlist[i].created = time(NULL);
-				strcpy(chanlist[i].topic, "");
-				strncpy(chanlist[i].setby, user->nick,NICKMAX);
-				chanlist[i].topicset = 0;
-				Ptr = &chanlist[i];
-				debug("add_channel: created: %s",cname);
-				/* set created to 2 to indicate user
-				 * is the first in the channel
-				 * and should be given ops */
-				created = 2;
-				break;
-			}
+			chanlist[cname] = new chanrec;
+
+			strcpy(chanlist[cname]->name, cname);
+			chanlist[cname]->topiclock = 1;
+			chanlist[cname]->noexternal = 1;
+			chanlist[cname]->created = time(NULL);
+			strcpy(chanlist[cname]->topic, "");
+			strncpy(chanlist[cname]->setby, user->nick,NICKMAX);
+			chanlist[cname]->topicset = 0;
+			Ptr = chanlist[cname];
+			debug("add_channel: created: %s",cname);
+			/* set created to 2 to indicate user
+			 * is the first in the channel
+			 * and should be given ops */
+			created = 2;
 		}
 	}
 	else
 	{
+		/* channel exists, just fish out a pointer to its struct */
 		Ptr = FindChan(cname);
 		if (Ptr)
 		{
@@ -637,12 +833,6 @@ struct chanrec* add_channel(struct userrec *user, char* cname, char* key)
 		created = 1;
 	}
 
-	if (!created)
-	{
-		debug("add_channel: OUT OF CHANNELS!!!");
-		WriteServ(user->fd,"405 %s %s :Server unable to create any more channels!",user->nick, cname);
-		return NULL;
-	}
 	
 	for (i =0; i <= MAXCHANS; i++)
 	{
@@ -668,6 +858,7 @@ struct chanrec* add_channel(struct userrec *user, char* cname, char* key)
 			WriteServ(user->fd,"366 %s %s :End of /NAMES list.", user->nick, Ptr->name);
 			WriteServ(user->fd,"324 %s %s +%s",user->nick, Ptr->name,chanmodes(Ptr));
 			WriteServ(user->fd,"329 %s %s %d", user->nick, Ptr->name, Ptr->created);
+			FOREACH_MOD OnUserJoin(user,Ptr);
 			return Ptr;
 		}
 	}
@@ -697,6 +888,7 @@ struct chanrec* del_channel(struct userrec *user, char* cname, char* reason)
 		return NULL;
 	}
 
+	FOREACH_MOD OnUserPart(user,Ptr);
 	debug("del_channel: removing: %s %s",user->nick,Ptr->name);
 	
 	for (i =0; i <= MAXCHANS; i++)
@@ -722,16 +914,17 @@ struct chanrec* del_channel(struct userrec *user, char* cname, char* reason)
 	/* if there are no users left on the channel */
 	if (!usercount(Ptr))
 	{
+		chan_hash::iterator iter = chanlist.find(Ptr->name);
+
 		debug("del_channel: destroying channel: %s",Ptr->name);
+
 		/* kill the record */
-		for (i = 0; i <= MAXCHAN ; i++)
+		if (iter != chanlist.end())
 		{
-			if  (&chanlist[i] == Ptr)
-			{
-				debug("del_channel: destroyed: %s",Ptr->name);
-				memset(&chanlist[i],0,sizeof(chanlist[i]));
-				break;
-			}
+			debug("del_channel: destroyed: %s",Ptr->name);
+			bzero(iter->second,sizeof(chanrec));
+			delete iter->second;
+			chanlist.erase(iter);
 		}
 	}
 }
@@ -756,7 +949,15 @@ void kick_channel(struct userrec *src,struct userrec *user, struct chanrec *Ptr,
 	}
 	if ((cstatus(src,Ptr) < STATUS_HOP) || (cstatus(src,Ptr) < cstatus(user,Ptr)))
 	{
-		WriteServ(src->fd,"482 %s %s :You must be at least a half-operator",src->nick, Ptr->name);
+		if (cstatus(src,Ptr) == STATUS_HOP)
+		{
+			WriteServ(src->fd,"482 %s %s :You must be a channel operator",src->nick, Ptr->name);
+		}
+		else
+		{
+			WriteServ(src->fd,"482 %s %s :You must be at least a half-operator",src->nick, Ptr->name);
+		}
+		
 		return;
 	}
 	
@@ -776,16 +977,17 @@ void kick_channel(struct userrec *src,struct userrec *user, struct chanrec *Ptr,
 	/* if there are no users left on the channel */
 	if (!usercount(Ptr))
 	{
-		debug("kick_channel: destroying channel: %s",Ptr->name);
+		chan_hash::iterator iter = chanlist.find(Ptr->name);
+
+		debug("del_channel: destroying channel: %s",Ptr->name);
+
 		/* kill the record */
-		for (i = 0; i <= MAXCHAN ; i++)
+		if (iter != chanlist.end())
 		{
-			if  (&chanlist[i] == Ptr)
-			{
-				debug("kick_channel: destroyed: %s",Ptr->name);
-				memset(&chanlist[i],0,sizeof(chanlist[i]));
-				break;
-			}
+			debug("del_channel: destroyed: %s",Ptr->name);
+			bzero(iter->second,sizeof(chanrec));
+			delete iter->second;
+			chanlist.erase(iter);
 		}
 	}
 }
@@ -827,6 +1029,11 @@ int give_ops(struct userrec *user,char *dest,struct chanrec *chan,int status)
 	}
 	else
 	{
+		if (!isnick(dest))
+		{
+			WriteServ(user->fd,"401 %s %s :No suck nick/channel",user->nick, dest);
+			return 0;
+		}
 		d = Find(dest);
 		if (!d)
 		{
@@ -870,6 +1077,11 @@ int give_hops(struct userrec *user,char *dest,struct chanrec *chan,int status)
 	else
 	{
 		d = Find(dest);
+		if (!isnick(dest))
+		{
+			WriteServ(user->fd,"401 %s %s :No suck nick/channel",user->nick, dest);
+			return 0;
+		}
 		if (!d)
 		{
 			WriteServ(user->fd,"401 %s %s :No suck nick/channel",user->nick, dest);
@@ -912,6 +1124,11 @@ int give_voice(struct userrec *user,char *dest,struct chanrec *chan,int status)
 	else
 	{
 		d = Find(dest);
+		if (!isnick(dest))
+		{
+			WriteServ(user->fd,"401 %s %s :No suck nick/channel",user->nick, dest);
+			return 0;
+		}
 		if (!d)
 		{
 			WriteServ(user->fd,"401 %s %s :No suck nick/channel",user->nick, dest);
@@ -954,6 +1171,11 @@ int take_ops(struct userrec *user,char *dest,struct chanrec *chan,int status)
 	else
 	{
 		d = Find(dest);
+		if (!isnick(dest))
+		{
+			WriteServ(user->fd,"401 %s %s :No suck nick/channel",user->nick, dest);
+			return 0;
+		}
 		if (!d)
 		{
 			WriteServ(user->fd,"401 %s %s :No suck nick/channel",user->nick, dest);
@@ -996,6 +1218,11 @@ int take_hops(struct userrec *user,char *dest,struct chanrec *chan,int status)
 	else
 	{
 		d = Find(dest);
+		if (!isnick(dest))
+		{
+			WriteServ(user->fd,"401 %s %s :No suck nick/channel",user->nick, dest);
+			return 0;
+		}
 		if (!d)
 		{
 			WriteServ(user->fd,"401 %s %s :No suck nick/channel",user->nick, dest);
@@ -1038,6 +1265,11 @@ int take_voice(struct userrec *user,char *dest,struct chanrec *chan,int status)
 	else
 	{
 		d = Find(dest);
+		if (!isnick(dest))
+		{
+			WriteServ(user->fd,"401 %s %s :No suck nick/channel",user->nick, dest);
+			return 0;
+		}
 		if (!d)
 		{
 			WriteServ(user->fd,"401 %s %s :No suck nick/channel",user->nick, dest);
@@ -1357,7 +1589,7 @@ void handle_mode(char **parameters, int pcnt, struct userrec *user)
 		}
 		if (!can_change)
 		{
-			WriteServ(user->fd,"482 %s :Can't change mmode for other users",user->nick);
+			WriteServ(user->fd,"482 %s :Can't change mode for other users",user->nick);
 			return;
 		}
 		for (i = 0; i < strlen(parameters[1]); i++)
@@ -1609,7 +1841,9 @@ void handle_join(char **parameters, int pcnt, struct userrec *user)
 	u = user;
 	if (loop_call(handle_join,parameters,pcnt,user,0,0,1))
 		return;
+	if (parameters[0][0] == '#') {
 	Ptr = add_channel(user,parameters[0],parameters[1]);
+	}
 }
 
 
@@ -1646,6 +1880,12 @@ void handle_kick(char **parameters, int pcnt, struct userrec *user)
 		return;
 	}
 	
+	if (!has_channel(u,Ptr))
+	{
+		WriteServ(user->fd,"442 %s %s :You're not on that channel!",user->nick, parameters[0]);
+		return;
+	}
+	
 	if (pcnt > 2)
 	{
 		kick_channel(user,u,Ptr,parameters[2]);
@@ -1660,25 +1900,60 @@ void handle_kick(char **parameters, int pcnt, struct userrec *user)
 void handle_die(char **parameters, int pcnt, struct userrec *user)
 {
         debug("die: %s",user->nick);
+	if (!strcmp(parameters[0],diepass)){
 	WriteOpers("*** DIE command from %s!%s@%s, terminating...",user->nick,user->ident,user->host);
-	sleep(5);
+        sleep(5);
 	Exit(ERROR);
+	}
+	else {
+	WriteOpers("*** Failed DIE Command from %s!%s@%s.",user->nick,user->ident,user->host);
+	}
 }
+
+void handle_restart(char **parameters, int pcnt, struct userrec *user)
+{
+        debug("restart: %s",user->nick);
+        if (!strcmp(parameters[0],restartpass))
+	{
+	        WriteOpers("*** RESTART command from %s!%s@%s, Pretending to restart till this is finished :D",user->nick,user->ident,user->host);
+	        sleep(5);
+	        Exit(ERROR);
+		/* Will finish this later when i can be arsed :) */
+        }
+        else {
+        	WriteOpers("*** Failed RESTART Command from %s!%s@%s.",user->nick,user->ident,user->host);
+        }
+}
+
 
 void kill_link(struct userrec *user,char* reason)
 {
-        debug("kill_link: %s '%s'",user->nick,reason);
+	user_hash::iterator iter = clientlist.find(user->nick);
+
+	debug("kill_link: %s '%s'",user->nick,reason);
 	Write(user->fd,"ERROR :Closing link (%s@%s) [%s]",user->ident,user->host,reason);
+	WriteOpers("*** Client exiting: %s!%s@%s [%s]",user->nick,user->ident,user->host,reason);
+	FOREACH_MOD OnUserQuit(user);
 	debug("closing fd %d",user->fd);
 	/* bugfix, cant close() a nonblocking socket (sux!) */
 	Blocking(user->fd);
 	WriteCommonExcept(user,"QUIT :%s");
 	close(user->fd);
+	NonBlocking(user->fd);
 	user->fd = 0;
 	user->modes[0] = '\0';
 	user->nick[0] = '\0';
 	user->registered = 0;
-	memset(user,0,sizeof(struct userrec));
+
+	if (iter != clientlist.end())
+	{
+		debug("deleting user hash value");
+		bzero(iter->second,sizeof(userrec));
+		delete iter->second;
+		clientlist.erase(iter);
+	}
+	
+	purge_empty_chans();
 }
 
 
@@ -1762,20 +2037,19 @@ void handle_topic(char **parameters, int pcnt, struct userrec *user)
 
 void send_error(char *s)
 {
-	int i = 0;
         debug("send_error: %s",s);
-	for (i = 0; i <= MAXCLIENTS; i++)
+  	for (user_hash::const_iterator i = clientlist.begin(); i != clientlist.end(); i++)
 	{
-		if (clientlist[i].fd)
+		if (i->second->fd)
 		{
-			WriteServ(clientlist[i].fd,"NOTICE %s :%s",clientlist[i].nick,s);
+			WriteServ(i->second->fd,"NOTICE %s :%s",i->second->nick,s);
 		}
 	}
 }
 
 void Error(int status)
 {
-  send_error("Error! Segmentation fault! save meeeeeeeeeeeeee *splat!*");
+  /*send_error("Error! Segmentation fault! save meeeeeeeeeeeeee *splat!*");*/
   exit(status);
 }
 
@@ -1799,39 +2073,92 @@ int main (int argc, char *argv[])
 	return 0;
 }
 
-
-void NonBlocking(int s)
+template<typename T> inline string ConvToStr(const T &in)
 {
-  int flags;
-  debug("NonBlocking: %d",socket);
-  flags = fcntl(s, F_GETFL, 0);
-  fcntl(s, F_SETFL, flags | O_NONBLOCK);
+	stringstream tmp;
+	if (!(tmp << in)) return string();
+	return tmp.str();
 }
+
+/* re-allocates a nick in the user_hash after they change nicknames,
+ * returns a pointer to the new user as it may have moved */
+
+struct userrec* ReHashNick(char* Old, char* New)
+{
+	user_hash::iterator newnick;
+	user_hash::iterator oldnick = clientlist.find(Old);
+
+	debug("ReHashNick: %s %s",Old,New);
+	
+	if (!strcasecmp(Old,New))
+	{
+		debug("old nick is new nick, skipping");
+		return oldnick->second;
+	}
+	
+	if (oldnick == clientlist.end()) return NULL; /* doesnt exist */
+
+	debug("ReHashNick: Found hashed nick %s",Old);
+
+	clientlist[New] = new userrec;
+	clientlist[New] = oldnick->second;
+	/*delete oldnick->second; */
+	clientlist.erase(oldnick);
+
+	debug("ReHashNick: Nick rehashed as %s",New);
+	
+	return clientlist[New];
+}
+
 
 /* add a client connection to the sockets list */
 void AddClient(int socket, char* host, int port)
 {
 	int i;
 	int blocking = 1;
+	char resolved[MAXBUF];
+	string tempnick;
+	char tn2[MAXBUF];
+	user_hash::iterator iter;
+	
+	tempnick = ConvToStr(socket) + "-unknown";
+	sprintf(tn2,"%d-unknown",socket);
+
+	iter = clientlist.find(tempnick);
+
+	if (iter != clientlist.end()) return;
+
+	/*
+	 * It is OK to access the value here this way since we know
+	 * it exists, we just created it above.
+	 *
+	 * At NO other time should you access a value in a map or a
+	 * hash_map this way.
+	 */
+	clientlist[tempnick] = new userrec;
+
 	NonBlocking(socket);
         debug("AddClient: %d %s %d",socket,host,port);
-	for (i = 0; i<=MAXCLIENTS; i++)
+
+	clientlist[tempnick]->fd = socket;
+	strncpy(clientlist[tempnick]->nick, tn2,256);
+	strncpy(clientlist[tempnick]->host, host,256);
+	strncpy(clientlist[tempnick]->dhost, host,256);
+	strncpy(clientlist[tempnick]->server, ServerName,256);
+	clientlist[tempnick]->registered = 0;
+	clientlist[tempnick]->signon = time(NULL);
+	clientlist[tempnick]->nping = time(NULL)+240;
+	clientlist[tempnick]->lastping = 1;
+	clientlist[tempnick]->port = port;
+	WriteServ(socket,"NOTICE Auth :Looking up your hostname...");
+	if(CleanAndResolve(resolved, host) != TRUE)
 	{
-		if (clientlist[i].fd == 0) {
-			memset(&clientlist[i],0,sizeof(&clientlist[i]));
-			clientlist[i].fd = socket;
-			strncpy(clientlist[i].host, host,256);
-			strncpy(clientlist[i].dhost, host,256);
-			strncpy(clientlist[i].server, ServerName,256);
-			clientlist[i].registered = 0;
-			clientlist[i].signon = time(NULL);
-			clientlist[i].nping = time(NULL)+240;
-			clientlist[i].lastping = 1;
-			clientlist[i].port = port;
-			WriteServ(socket,"NOTICE Auth :Looking up your hostname...");
-			break;
-		}
-	}
+		snprintf(resolved,MAXBUF,"%s",host);
+	}			
+	strncpy(clientlist[tempnick]->host,resolved,256);
+	strncpy(clientlist[tempnick]->dhost,resolved,256);
+	if (clientlist.size() == MAXCLIENTS)
+		kill_link(clientlist[tempnick],"No more connections allowed in this class");
 }
 
 void handle_names(char **parameters, int pcnt, struct userrec *user)
@@ -1964,6 +2291,25 @@ char* chlist(struct userrec *user)
 	return lst;
 }
 
+void handle_info(char **parameters, int pcnt, struct userrec *user)
+{
+	WriteServ(user->fd,"371 %s :The Inspire IRCd Project Has been brought to you by the following people..",user->nick);
+	WriteServ(user->fd,"371 %s :Craig Edwards, Craig McLure, and Others..",user->nick);
+	WriteServ(user->fd,"371 %s :Will finish this later when i can be arsed :p",user->nick);
+	WriteServ(user->fd,"374 %s :End of /INFO list",user->nick);
+}
+
+void handle_time(char **parameters, int pcnt, struct userrec *user)
+{
+	time_t rawtime;
+	struct tm * timeinfo;
+
+	time ( &rawtime );
+	timeinfo = localtime ( &rawtime );
+	WriteServ(user->fd,"391 %s %s :%s",user->nick,ServerName, asctime (timeinfo) );
+  
+}
+
 void handle_whois(char **parameters, int pcnt, struct userrec *user)
 {
 	struct userrec *dest;
@@ -1975,7 +2321,7 @@ void handle_whois(char **parameters, int pcnt, struct userrec *user)
 	if (dest)
 	{
 		WriteServ(user->fd,"311 %s %s %s %s * :%s",user->nick, dest->nick, dest->ident, dest->dhost, dest->fullname);
-		if (user == dest)
+		if ((user == dest) || (strstr(user->modes,"o")))
 		{
 			WriteServ(user->fd,"378 %s %s :is connecting from *@%s",user->nick, dest->nick, dest->host);
 		}
@@ -1984,7 +2330,7 @@ void handle_whois(char **parameters, int pcnt, struct userrec *user)
 			WriteServ(user->fd,"319 %s %s :%s",user->nick, dest->nick, chlist(dest));
 		}
 		WriteServ(user->fd,"312 %s %s %s :%s",user->nick, dest->nick, dest->server, ServerDesc);
-		if (strstr(user->modes,"o"))
+		if (strstr(dest->modes,"o"))
 		{
 			WriteServ(user->fd,"313 %s %s :is an IRC operator",user->nick, dest->nick);
 		}
@@ -2003,6 +2349,8 @@ void handle_whois(char **parameters, int pcnt, struct userrec *user)
 
 void handle_quit(char **parameters, int pcnt, struct userrec *user)
 {
+	user_hash::iterator iter = clientlist.find(user->nick);
+
 	/* theres more to do here, but for now just close the socket */
 	if (pcnt == 1)
 	{
@@ -2011,34 +2359,50 @@ void handle_quit(char **parameters, int pcnt, struct userrec *user)
 			*parameters[0]++;
 		}
 		Write(user->fd,"ERROR :Closing link (%s@%s) [%s]",user->ident,user->host,parameters[0]);
+		WriteOpers("*** Client exiting: %s!%s@%s [%s]",user->nick,user->ident,user->host,parameters[0]);
 		WriteCommonExcept(user,"QUIT :%s%s",PrefixQuit,parameters[0]);
 	}
 	else
 	{
 		Write(user->fd,"ERROR :Closing link (%s@%s) [QUIT]",user->ident,user->host);
+		WriteOpers("*** Client exiting: %s!%s@%s [Client exited]",user->nick,user->ident,user->host);
 		WriteCommonExcept(user,"QUIT :Client exited");
 	}
+
+	FOREACH_MOD OnUserQuit(user);
+
+	/* confucious say, he who close nonblocking socket, get nothing! */
+	Blocking(user->fd);
 	close(user->fd);
-	memset(user,0,sizeof(user));
+	NonBlocking(user->fd);
+
+	if (iter != clientlist.end())
+	{
+		debug("deleting user hash value");
+		bzero(iter->second,sizeof(userrec));
+		delete iter->second;
+		clientlist.erase(iter);
+	}
+	
+	purge_empty_chans();
 }
 
 void handle_who(char **parameters, int pcnt, struct userrec *user)
 {
 	struct chanrec* Ptr;
-	int i = 0;
 	
 	/* theres more to do here, but for now just close the socket */
 	if (pcnt == 1)
 	{
-		if (!strcmp(parameters[0],"0"))
+		if ((!strcmp(parameters[0],"0")) || (!strcmp(parameters[0],"*")))
 		{
-			Ptr = FindChan(user->chans[0].channel->name);
+			Ptr = user->chans[0].channel;
 			printf(user->chans[0].channel->name);
-			for (i = 0; i <= MAXCLIENTS; i++)
+		  	for (user_hash::const_iterator i = clientlist.begin(); i != clientlist.end(); i++)
 			{
-				if ((common_channels(user,&clientlist[i])) && (strcmp(clientlist[i].nick,"")))
+				if ((common_channels(user,i->second)) && (isnick(i->second->nick)))
 				{
-					WriteServ(user->fd,"352 %s %s %s %s %s %s Hr@ :0 %s",user->nick, Ptr->name, clientlist[i].ident, clientlist[i].dhost, ServerName, clientlist[i].nick, clientlist[i].fullname);
+					WriteServ(user->fd,"352 %s %s %s %s %s %s Hr@ :0 %s",user->nick, Ptr->name, i->second->ident, i->second->dhost, ServerName, i->second->nick, i->second->fullname);
 				}
 			}
 			WriteServ(user->fd,"315 %s %s :End of /WHO list.",user->nick, Ptr->name);
@@ -2049,11 +2413,11 @@ void handle_who(char **parameters, int pcnt, struct userrec *user)
 			Ptr = FindChan(parameters[0]);
 			if (Ptr)
 			{
-				for (i = 0; i <= MAXCLIENTS; i++)
+			  	for (user_hash::const_iterator i = clientlist.begin(); i != clientlist.end(); i++)
 				{
-					if ((has_channel(&clientlist[i],Ptr)) && (strcmp(clientlist[i].nick,"")))
+					if ((has_channel(i->second,Ptr)) && (isnick(i->second->nick)))
 					{
-						WriteServ(user->fd,"352 %s %s %s %s %s %s Hr@ :0 %s",user->nick, Ptr->name, clientlist[i].ident, clientlist[i].dhost, ServerName, clientlist[i].nick, clientlist[i].fullname);
+						WriteServ(user->fd,"352 %s %s %s %s %s %s Hr@ :0 %s",user->nick, Ptr->name, i->second->ident, i->second->dhost, ServerName, i->second->nick, i->second->fullname);
 					}
 				}
 				WriteServ(user->fd,"315 %s %s :End of /WHO list.",user->nick, Ptr->name);
@@ -2064,24 +2428,111 @@ void handle_who(char **parameters, int pcnt, struct userrec *user)
 			}
 		}
 	}
+	if (pcnt == 2)
+	{
+                if ((!strcmp(parameters[0],"0")) || (!strcmp(parameters[0],"*")) && (!strcmp(parameters[1],"o")))
+                {
+                        Ptr = user->chans[0].channel;
+                        printf(user->chans[0].channel->name);
+		  	for (user_hash::const_iterator i = clientlist.begin(); i != clientlist.end(); i++)
+                        {
+                                if ((common_channels(user,i->second)) && (isnick(i->second->nick)))
+                                {
+                                        if (strstr(i->second->modes,"o"))
+                                        {
+                                                WriteServ(user->fd,"352 %s %s %s %s %s %s Hr@ :0 %s",user->nick, Ptr->name, i->second->ident, i->second->dhost, ServerName, i->second->nick, i->second->fullname);
+                                        }
+                                }
+                        }
+                        WriteServ(user->fd,"315 %s %s :End of /WHO list.",user->nick, Ptr->name);
+                        return;
+                }
+	}
+}
+
+void handle_wallops(char **parameters, int pcnt, struct userrec *user)
+{
+	WriteWallOps(user,"%s",parameters[0]);
 }
 
 void handle_list(char **parameters, int pcnt, struct userrec *user)
 {
 	struct chanrec* Ptr;
-	int i = 0;
 	
 	WriteServ(user->fd,"321 %s Channel :Users Name",user->nick);
-	for (i = 0; i < MAXCHAN; i++)
+	for (chan_hash::const_iterator i = chanlist.begin(); i != chanlist.end(); i++)
 	{
-		if (chanlist[i].created)
-		{
-			WriteServ(user->fd,"322 %s %s %d :[+%s] %s",user->nick,chanlist[i].name,usercount(&chanlist[i]),chanmodes(&chanlist[i]),chanlist[i].topic);
-		}
+		WriteServ(user->fd,"322 %s %s %d :[+%s] %s",user->nick,i->second->name,usercount(i->second),chanmodes(i->second),i->second->topic);
 	}
 	WriteServ(user->fd,"323 %s :End of channel list.",user->nick);
 }
 
+
+void handle_rehash(char **parameters, int pcnt, struct userrec *user)
+{
+	WriteServ(user->fd,"382 %s %s :Rehashing",user->nick,CONFIG_FILE);
+	ReadConfig();
+	WriteOpers("%s is rehashing config file %s",user->nick,CONFIG_FILE);
+}
+
+
+int usercnt(void)
+{
+	return clientlist.size();
+}
+
+int usercount_invisible(void)
+{
+	int c = 0;
+
+	for (user_hash::const_iterator i = clientlist.begin(); i != clientlist.end(); i++)
+	{
+		if ((i->second->fd) && (isnick(i->second->nick)) && (strchr(i->second->modes,'i'))) c++;
+	}
+	return c;
+}
+
+int usercount_opers(void)
+{
+	int c = 0;
+
+	for (user_hash::const_iterator i = clientlist.begin(); i != clientlist.end(); i++)
+	{
+		if ((i->second->fd) && (isnick(i->second->nick)) && (strchr(i->second->modes,'o'))) c++;
+	}
+	return c;
+}
+
+int usercount_unknown(void)
+{
+	int c = 0;
+
+	for (user_hash::const_iterator i = clientlist.begin(); i != clientlist.end(); i++)
+	{
+		if ((i->second->fd) && (i->second->registered != 7))
+			c++;
+	}
+	return c;
+}
+
+int chancount(void)
+{
+	return chanlist.size();
+}
+
+int servercount(void)
+{
+	return 1;
+}
+
+void handle_lusers(char **parameters, int pcnt, struct userrec *user)
+{
+	WriteServ(user->fd,"251 %s :There are %d users and %d invisible on %d servers",user->nick,usercnt(),usercount_invisible(),servercount());
+	WriteServ(user->fd,"252 %s %d :operator(s) online",user->nick,usercount_opers());
+	WriteServ(user->fd,"253 %s %d :unknown connections",user->nick,usercount_unknown());
+	WriteServ(user->fd,"254 %s %d :channels formed",user->nick,chancount());
+	WriteServ(user->fd,"254 %s :I have %d clients and 0 servers",user->nick,usercnt());
+}
 
 void handle_admin(char **parameters, int pcnt, struct userrec *user)
 {
@@ -2100,7 +2551,7 @@ void ShowMOTD(struct userrec *user)
 	f =  fopen(motd,"r");
 	if (f)
 	{
-		WriteServ(user->fd,"375 %s :- %s message of the day",user->nick,Network);
+		WriteServ(user->fd,"375 %s :- message of the day, %s",user->nick,ServerName);
 		while (!feof(f))
 		{
 			fgets(linebuf,sizeof(linebuf),f);
@@ -2171,12 +2622,13 @@ void ConnectUser(struct userrec *user)
 	WriteServ(user->fd,"005 %s :MAP KNOCK SAFELIST HCN MAXCHANNELS=20 MAXBANS=60 NICKLEN=30 TOPICLEN=307 KICKLEN=307 MAXTARGETS=20 AWAYLEN=307 :are supported by this server",user->nick);
 	WriteServ(user->fd,"005 %s :WALLCHOPS WATCH=128 SILENCE=5 MODES=13 CHANTYPES=# PREFIX=(ohv)@%c+ CHANMODES=ohvbeqa,kfL,l,psmntirRcOAQKVHGCuzN NETWORK=%s :are supported by this server",user->nick,'%',Network);
 	ShowMOTD(user);
+	FOREACH_MOD OnUserConnect(user);
 	WriteOpers("*** Client connecting on port %d: %s!%s@%s",user->port,user->nick,user->ident,user->host);
 }
 
 void handle_version(char **parameters, int pcnt, struct userrec *user)
 {
-	WriteServ(user->fd,"351 %s :%s %s :(C) ChatSpike 2002",user->nick,VERSION,ServerName);
+	WriteServ(user->fd,"351 %s :%s %s :%s",user->nick,VERSION,ServerName,SYSTEM);
 }
 
 void handle_ping(char **parameters, int pcnt, struct userrec *user)
@@ -2204,7 +2656,7 @@ void handle_user(char **parameters, int pcnt, struct userrec *user)
 {
 	if (user->registered < 3)
 	{
-		WriteServ(user->fd,"NOTICE Auth :No ident response, ident prefied with ~");
+		WriteServ(user->fd,"NOTICE Auth :No ident response, ident prefixed with ~");
 		strcpy(user->ident,"~"); /* we arent checking ident... but these days why bother anyway? */
 		strncat(user->ident,parameters[0],64);
 		strncpy(user->fullname,parameters[3],128);
@@ -2221,6 +2673,117 @@ void handle_user(char **parameters, int pcnt, struct userrec *user)
 		/* user is registered now, bit 0 = USER command, bit 1 = sent a NICK command */
 		ConnectUser(user);
 	}
+}
+
+void handle_userhost(char **parameters, int pcnt, struct userrec *user)
+{
+	char Return[MAXBUF],junk[MAXBUF];
+	sprintf(Return,"302 %s :",user->nick);
+	for (int i = 0; i < pcnt; i++)
+	{
+		struct userrec *u = Find(parameters[i]);
+		if (u)
+		{
+			if (strstr(u->modes,"o"))
+			{
+				sprintf(junk,"%s*=+%s@%s ",u->nick,u->ident,u->host);
+				strcat(Return,junk);
+			}
+			else
+			{
+				sprintf(junk,"%s=+%s@%s ",u->nick,u->ident,u->host);
+				strcat(Return,junk);
+			}
+		}
+	}
+	WriteServ(user->fd,Return);
+}
+
+void handle_stats(char **parameters, int pcnt, struct userrec *user)
+{
+	if (pcnt != 1)
+	{
+		return;
+	}
+	if (strlen(parameters[0])>1)
+	{
+		/* make the stats query 1 character long */
+		parameters[0][1] = '\0';
+	}
+
+	/* stats m (list number of times each command has been used, plus bytecount) */
+	if (!strcasecmp(parameters[0],"m"))
+	{
+		for (int i = 0; i < cmdlist.size(); i++)
+		{
+			if (cmdlist[i].handler_function)
+			{
+				if (cmdlist[i].use_count)
+				{
+					/* RPL_STATSCOMMANDS */
+					WriteServ(user->fd,"212 %s %d %d",cmdlist[i].command,cmdlist[i].use_count,cmdlist[i].total_bytes);
+				}
+			}
+		}
+			
+	}
+
+	/* stats o (O *@*.sprint-canada.net * daisy rhgwlcLkKbBnGzWHv clients) */
+	if (!strcasecmp(parameters[0],"o"))
+	{
+		for (int i = 0; i < ConfValueEnum("oper"); i++)
+		{
+			char LoginName[MAXBUF];
+			char HostName[MAXBUF];
+			char OperType[MAXBUF];
+			ConfValue("oper","name",i,LoginName);
+			ConfValue("oper","host",i,HostName);
+			ConfValue("oper","type",i,OperType);
+			WriteServ(user->fd,"243 %s O %s * %s %s 0",user->nick,HostName,LoginName,OperType);
+		}
+	}
+	
+	/* stats l (show user I/O stats) */
+	if (!strcasecmp(parameters[0],"l"))
+	{
+		WriteServ(user->fd,"211 %s :server:port nick bytes_in cmds_in bytes_out cmds_out",user->nick);
+	  	for (user_hash::iterator i = clientlist.begin(); i != clientlist.end(); i++)
+		{
+			if (isnick(user->nick))
+			{
+				WriteServ(user->fd,"211 %s :%s:%d %s %d %d %d %d",user->nick,ServerName,i->second->port,i->second->nick,i->second->bytes_in,i->second->cmds_in,i->second->bytes_out,i->second->cmds_out);
+			}
+			else
+			{
+				WriteServ(user->fd,"211 %s :%s:%d (unknown@%d) %d %d %d %d",user->nick,ServerName,i->second->port,i->second->fd,i->second->bytes_in,i->second->cmds_in,i->second->bytes_out,i->second->cmds_out);
+			}
+			
+		}
+	}
+	
+	/* stats u (show server uptime) */
+	if (!strcasecmp(parameters[0],"u"))
+	{
+		time_t current_time = 0;
+		current_time = time(NULL);
+		time_t server_uptime = current_time - startup_time;
+		struct tm* stime;
+		stime = gmtime(&server_uptime);
+		/* i dont know who the hell would have an ircd running for over a year nonstop, but
+		 * Craig suggested this, and it seemed a good idea so in it went */
+		if (stime->tm_year > 70)
+		{
+			WriteServ(user->fd,"242 %s :Server up %d years, %d days, %.2d:%.2d:%.2d",user->nick,(stime->tm_year-70),stime->tm_yday,stime->tm_hour,stime->tm_min,stime->tm_sec);
+		}
+		else
+		{
+			WriteServ(user->fd,"242 %s :Server up %d days, %.2d:%.2d:%.2d",user->nick,stime->tm_yday,stime->tm_hour,stime->tm_min,stime->tm_sec);
+		}
+	}
+
+	WriteServ(user->fd,"219 %s %s :End of /STATS report",user->nick,parameters[0]);
+	WriteOpers("*** Notice: Stats '%s' requested by %s (%s@%s)",parameters[0],user->nick,user->ident,user->host);
+	
 }
 
 void handle_oper(char **parameters, int pcnt, struct userrec *user)
@@ -2262,19 +2825,49 @@ void handle_oper(char **parameters, int pcnt, struct userrec *user)
 	}
 	/* no such oper */
 	WriteServ(user->fd,"491 %s :Invalid oper credentials",user->nick);
+	WriteOpers("*** WARNING! Failed oper attempt by %s!%s@%s!",user->nick,user->ident,user->host);
 }
 				
 void handle_nick(char **parameters, int pcnt, struct userrec *user)
 {
-	if (!strcmp(parameters[0],user->nick))
+	if (pcnt < 1) 
 	{
+		debug("not enough params for handle_nick");
+		return;
+	}
+	if (!parameters[0])
+	{
+		debug("invalid parameter passed to handle_nick");
+		return;
+	}
+	if (!strlen(parameters[0]))
+	{
+		debug("zero length new nick passed to handle_nick");
+		return;
+	}
+	if (!user)
+	{
+		debug("invalid user passed to handle_nick");
+		return;
+	}
+	if (!user->nick)
+	{
+		debug("invalid old nick passed to handle_nick");
+		return;
+	}
+	if (!strcasecmp(user->nick,parameters[0]))
+	{
+		debug("old nick is new nick, skipping");
 		return;
 	}
 	else
 	{
-		if (parameters[0][0] == ':')
+		if (strlen(parameters[0]) > 1)
 		{
-			*parameters[0]++;
+			if (parameters[0][0] == ':')
+			{
+				*parameters[0]++;
+			}
 		}
 		if ((Find(parameters[0])) && (Find(parameters[0]) != user))
 		{
@@ -2287,11 +2880,22 @@ void handle_nick(char **parameters, int pcnt, struct userrec *user)
 		WriteServ(user->fd,"432 %s %s :Erroneous Nickname",user->nick,parameters[0]);
 		return;
 	}
+
 	if (user->registered == 7)
 	{
 		WriteCommon(user,"NICK %s",parameters[0]);
 	}
-	strcpy(user->nick, parameters[0]);
+	
+	/* change the nick of the user in the users_hash */
+	user = ReHashNick(user->nick, parameters[0]);
+	/* actually change the nick within the record */
+	if (!user) return;
+	if (!user->nick) return;
+
+	strncpy(user->nick, parameters[0],NICKMAX);
+
+	debug("new nick set: %s",user->nick);
+	
 	if (user->registered < 3)
 		user->registered = (user->registered | 2);
 	if (user->registered == 3)
@@ -2299,6 +2903,7 @@ void handle_nick(char **parameters, int pcnt, struct userrec *user)
 		/* user is registered now, bit 0 = USER command, bit 1 = sent a NICK command */
 		ConnectUser(user);
 	}
+	debug("exit nickchange: %s",user->nick);
 }
 
 int process_parameters(char **command_p,char *parameters)
@@ -2307,6 +2912,27 @@ int process_parameters(char **command_p,char *parameters)
 	int j = 0;
 	int q = 0;
 	q = strlen(parameters);
+	if (!q)
+	{
+		/* no parameters, command_p invalid! */
+		return 0;
+	}
+	if (q)
+	{
+		if ((strstr(parameters," ")==NULL) || (parameters[0] == ':'))
+		{
+			/* only one parameter */
+			command_p[0] = parameters;
+			if (parameters[0] == ':')
+			{
+				if (strstr(parameters," ") != NULL)
+				{
+					command_p[0]++;
+				}
+			}
+			return 1;
+		}
+	}
 	command_p[j++] = parameters;
 	for (i = 0; i <= q; i++)
 	{
@@ -2347,7 +2973,7 @@ void process_command(struct userrec *user, char* cmd)
 	/* strip out extraneous linefeeds through mirc's crappy pasting (thanks Craig) */
 	for (i = 0; i < strlen(temp); i++)
 	{
-		if ((temp[i] != 10) && (temp[i] != 13) && (temp[i] != 0) && (temp[i] != 7) && (temp[i] != 9))
+		if ((temp[i] != 10) && (temp[i] != 13) && (temp[i] != 0) && (temp[i] != 7))
 		{
 			cmd[j++] = temp[i];
 			cmd[j] = 0;
@@ -2381,8 +3007,8 @@ void process_command(struct userrec *user, char* cmd)
 		}
 	}
 	cmd_found = 0;
-	i = 0;
-	for (i = 0; i<MAXCOMMAND; i++)
+
+	for (i = 0; i != cmdlist.size(); i++)
 	{
 		if (strcmp(cmdlist[i].command,""))
 		{
@@ -2403,12 +3029,11 @@ void process_command(struct userrec *user, char* cmd)
 					user->idle_lastmsg = time(NULL);
 					/* activity resets the ping pending timer */
 					user->nping = time(NULL) + 120;
-					if ((items+1) < cmdlist[i].min_params)
+					if ((items) < cmdlist[i].min_params)
 					{
 					        debug("process_command: not enough parameters: %s %s",user->nick,command);
 						WriteServ(user->fd,"461 %s %s :Not enough parameters",user->nick,command);
-						cmd_found = 1;
-						break;
+						return;
 					}
 					if ((!strchr(user->modes,cmdlist[i].flags_needed)) && (cmdlist[i].flags_needed))
 					{
@@ -2417,17 +3042,36 @@ void process_command(struct userrec *user, char* cmd)
 						cmd_found = 1;
 						break;
 					}
+		/* if the command isnt USER, PASS, or NICK, and nick is empty,
+		 * deny command! */
+					if ((strcmp(command,"USER")) && (strcmp(command,"NICK")) && (strcmp(command,"PASS")))
+					{
+						if ((!isnick(user->nick)) || (user->registered != 7))
+						{
+						        debug("process_command: not registered: %s %s",user->nick,command);
+							WriteServ(user->fd,"451 %s :You have not registered",command);
+							return;
+						}
+					}
 					if ((user->registered == 7) || (!strcmp(command,"USER")) || (!strcmp(command,"NICK")) || (!strcmp(command,"PASS")))
 					{
 					        debug("process_command: handler: %s %s %d",user->nick,command,items);
-						cmdlist[i].handler_function(command_p,items,user);
+						if (cmdlist[i].handler_function)
+						{
+							cmdlist[i].handler_function(command_p,items,user);
+							/* ikky /stats counters */
+							cmdlist[i].use_count++;
+							cmdlist[i].total_bytes+=strlen(temp);
+							user->bytes_in += strlen(temp);
+							user->cmds_in++;
+						}
+						return;
 					}
 					else
 					{
 					        debug("process_command: not registered: %s %s",user->nick,command);
 						WriteServ(user->fd,"451 %s :You have not registered",command);
-						cmd_found=1;
-						break;
+						return;
 					}
 				}
 				cmd_found = 1;
@@ -2441,127 +3085,53 @@ void process_command(struct userrec *user, char* cmd)
 	}
 }
 
+
+void createcommand(char* cmd, handlerfunc f, char flags, int minparams)
+{
+	command_t comm;
+	/* create the command and push it onto the table */	
+	strcpy(comm.command,cmd);
+	comm.handler_function = f;
+	comm.flags_needed = flags;
+	comm.min_params = minparams;
+	comm.use_count = 0;
+	comm.total_bytes = 0;
+	cmdlist.push_back(comm);
+}
+
 void SetupCommandTable(void)
 {
-  int i = 0;
-  
-  strcpy(cmdlist[i].command,		"USER");
-  cmdlist[i].handler_function = 	handle_user;
-  cmdlist[i].flags_needed=		0;
-  cmdlist[i++].min_params=        	4;
-  
-  strcpy(cmdlist[i].command,		"NICK");
-  cmdlist[i].handler_function = 	handle_nick;
-  cmdlist[i].flags_needed=		0;
-  cmdlist[i++].min_params=        	1;
-  
-  strcpy(cmdlist[i].command,		"QUIT");
-  cmdlist[i].handler_function = 	handle_quit;
-  cmdlist[i].flags_needed=		0;
-  cmdlist[i++].min_params=        	1;
-
-  strcpy(cmdlist[i].command,		"VERSION");
-  cmdlist[i].handler_function = 	handle_version;
-  cmdlist[i].flags_needed=		0;
-  cmdlist[i++].min_params=        	0;
-
-  strcpy(cmdlist[i].command,		"PING");
-  cmdlist[i].handler_function = 	handle_ping;
-  cmdlist[i].flags_needed=		0;
-  cmdlist[i++].min_params=        	1;
-
-  strcpy(cmdlist[i].command,		"PONG");
-  cmdlist[i].handler_function = 	handle_pong;
-  cmdlist[i].flags_needed=		0;
-  cmdlist[i++].min_params=        	1;
-
-  strcpy(cmdlist[i].command,		"ADMIN");
-  cmdlist[i].handler_function = 	handle_admin;
-  cmdlist[i].flags_needed=		0;
-  cmdlist[i++].min_params=        	0;
-
-  strcpy(cmdlist[i].command,		"PRIVMSG");
-  cmdlist[i].handler_function = 	handle_privmsg;
-  cmdlist[i].flags_needed=		0;
-  cmdlist[i++].min_params=        	2;
-
-  strcpy(cmdlist[i].command,		"WHOIS");
-  cmdlist[i].handler_function = 	handle_whois;
-  cmdlist[i].flags_needed=		0;
-  cmdlist[i++].min_params=        	1;
-
-  strcpy(cmdlist[i].command,		"NOTICE");
-  cmdlist[i].handler_function = 	handle_notice;
-  cmdlist[i].flags_needed=		0;
-  cmdlist[i++].min_params=        	2;
-
-  strcpy(cmdlist[i].command,		"JOIN");
-  cmdlist[i].handler_function = 	handle_join;
-  cmdlist[i].flags_needed=		0;
-  cmdlist[i++].min_params=        	1;
-
-  strcpy(cmdlist[i].command,		"NAMES");
-  cmdlist[i].handler_function = 	handle_names;
-  cmdlist[i].flags_needed=		0;
-  cmdlist[i++].min_params=        	1;
-
-  strcpy(cmdlist[i].command,		"PART");
-  cmdlist[i].handler_function = 	handle_part;
-  cmdlist[i].flags_needed=		0;
-  cmdlist[i++].min_params=        	1;
-
-  strcpy(cmdlist[i].command,		"KICK");
-  cmdlist[i].handler_function = 	handle_kick;
-  cmdlist[i].flags_needed=		0;
-  cmdlist[i++].min_params=        	2;
-
-  strcpy(cmdlist[i].command,		"MODE");
-  cmdlist[i].handler_function = 	handle_mode;
-  cmdlist[i].flags_needed=		0;
-  cmdlist[i++].min_params=        	1;
-
-  strcpy(cmdlist[i].command,		"TOPIC");
-  cmdlist[i].handler_function = 	handle_topic;
-  cmdlist[i].flags_needed=		0;
-  cmdlist[i++].min_params=        	2;
-
-  strcpy(cmdlist[i].command,		"WHO");
-  cmdlist[i].handler_function = 	handle_who;
-  cmdlist[i].flags_needed=		0;
-  cmdlist[i++].min_params=        	2;
-
-  strcpy(cmdlist[i].command,		"MOTD");
-  cmdlist[i].handler_function = 	handle_motd;
-  cmdlist[i].flags_needed=		0;
-  cmdlist[i++].min_params=        	2;
-
-  strcpy(cmdlist[i].command,		"RULES");
-  cmdlist[i].handler_function = 	handle_rules;
-  cmdlist[i].flags_needed=		0;
-  cmdlist[i++].min_params=        	2;
-
-  strcpy(cmdlist[i].command,		"OPER");
-  cmdlist[i].handler_function = 	handle_oper;
-  cmdlist[i].flags_needed=		0;
-  cmdlist[i++].min_params=        	2;
-
-  strcpy(cmdlist[i].command,		"LIST");
-  cmdlist[i].handler_function = 	handle_list;
-  cmdlist[i].flags_needed=		0;
-  cmdlist[i++].min_params=        	0;
-
-  strcpy(cmdlist[i].command,		"DIE");
-  cmdlist[i].handler_function = 	handle_die;
-  cmdlist[i].flags_needed=		'o';
-  cmdlist[i++].min_params=        	0;
-
-  strcpy(cmdlist[i].command,		"KILL");
-  cmdlist[i].handler_function = 	handle_kill;
-  cmdlist[i].flags_needed=		'o';
-  cmdlist[i++].min_params=        	2;
-
-  MAXCOMMAND = i;
-  
+  createcommand("USER",handle_user,0,4);
+  createcommand("NICK",handle_nick,0,1);
+  createcommand("QUIT",handle_quit,0,1);
+  createcommand("VERSION",handle_version,0,0);
+  createcommand("PING",handle_ping,0,1);
+  createcommand("PONG",handle_pong,0,1);
+  createcommand("ADMIN",handle_admin,0,0);
+  createcommand("PRIVMSG",handle_privmsg,0,2);
+  createcommand("INFO",handle_info,0,0);
+  createcommand("TIME",handle_time,0,0);
+  createcommand("WHOIS",handle_whois,0,1);
+  createcommand("WALLOPS",handle_wallops,'o',1);
+  createcommand("NOTICE",handle_notice,0,2);
+  createcommand("JOIN",handle_join,0,1);
+  createcommand("NAMES",handle_names,0,1);
+  createcommand("PART",handle_part,0,1);
+  createcommand("KICK",handle_kick,0,2);
+  createcommand("MODE",handle_mode,0,1);
+  createcommand("TOPIC",handle_topic,0,1);
+  createcommand("WHO",handle_who,0,1);
+  createcommand("MOTD",handle_motd,0,0);
+  createcommand("RULES",handle_join,0,0);
+  createcommand("OPER",handle_oper,0,2);
+  createcommand("LIST",handle_list,0,0);
+  createcommand("DIE",handle_die,'o',1);
+  createcommand("RESTART",handle_restart,'o',1);
+  createcommand("KILL",handle_kill,'o',2);
+  createcommand("REHASH",handle_rehash,'o',0);
+  createcommand("LUSERS",handle_lusers,0,0);
+  createcommand("STATS",handle_stats,0,1);
+  createcommand("USERHOST",handle_userhost,0,1);
 }
 
 void process_buffer(struct userrec *user)
@@ -2601,17 +3171,20 @@ void process_buffer(struct userrec *user)
 int InspIRCd(void)
 {
   struct sockaddr_in client, server;
-  int length, portCount = 0, ports[MAXSOCKS];
+  int portCount = 0, ports[MAXSOCKS];
+  char addrs[MAXBUF][255];
   int openSockfd[MAXSOCKS], incomingSockfd, result = TRUE;
+  socklen_t length;
   int count = 0, scanDetectTrigger = TRUE, showBanner = FALSE, boundPortCount = 0;
   int selectResult = 0;
-  char *temp, configToken[MAXBUF], stuff[MAXBUF];
+  char *temp, configToken[MAXBUF], stuff[MAXBUF], Addr[MAXBUF];
   char resolvedHost[MAXBUF];
   fd_set selectFds;
   struct timeval tv;
   int count2;
 
   debug("InspIRCd: startup: begin");
+  debug("$Id: inspircd.cpp,v 1.24 2003/01/11 19:00:10 brain Exp $");
   if ((geteuid()) && (getuid()) == 0)
   {
 	printf("WARNING!!! You are running an irc server as ROOT!!! DO NOT DO THIS!!!\n\n");
@@ -2620,34 +3193,64 @@ int InspIRCd(void)
   }
   SetupCommandTable();
   debug("InspIRCd: startup: default command table set up");
-  memset(clientlist, 0, sizeof(clientlist));
-  memset(chanlist,0,sizeof(chanlist));
-  debug("InspIRCd: startup: list init");
 
-  ConfValue("server","name",0,ServerName);
-  ConfValue("server","description",0,ServerDesc);
-  ConfValue("server","network",0,Network);
-  ConfValue("admin","name",0,AdminName);
-  ConfValue("admin","email",0,AdminEmail);
-  ConfValue("admin","nick",0,AdminNick);
-  ConfValue("files","motd",0,motd);
-  ConfValue("files", "rules",0,rules);
-  ConfValue("options","prefixquit",0,PrefixQuit);
-
+  ReadConfig();
+  if (strcmp(DieValue,"")) 
+  { 
+	printf("WARNING: %s\n\n",DieValue);
+	exit(0); 
+  }  
   debug("InspIRCd: startup: read config");
   
   for (count = 0; count < ConfValueEnum("bind"); count++)
   {
 	ConfValue("bind","port",count,configToken);
+	ConfValue("bind","address",count,Addr);
 	ports[count] = atoi(configToken);
-	debug("InspIRCd: startup: got port %d",ports[count]);
+	strcpy(addrs[count],Addr);
+	debug("InspIRCd: startup: read binding %s:%d from config",addrs[count],ports[count]);
   }
   portCount = ConfValueEnum("bind");
-  debug("InspIRCd: startup: got %d total ports",portCount);
+  debug("InspIRCd: startup: read %d total ports",portCount);
 
-  printf("InspIRCd is now running!\n");
   debug("InspIRCd: startup: InspIRCd is now running!");
 
+  printf("\n");
+  for (count = 0; count < ConfValueEnum("module"); count++)
+  {
+	char modfile[MAXBUF];
+	ConfValue("module","name",count,configToken);
+	sprintf(modfile,"%s/%s",MOD_PATH,configToken);
+	printf("Loading module... \033[1;37m%s\033[0;37m\n",modfile);
+	debug("InspIRCd: startup: Loading module: %s",modfile);
+	
+  	factory[count] = new ircd_module(modfile);
+	if (factory[count]->LastError())
+	{
+		debug("Unable to load %s: %s",modfile,factory[count]->LastError());
+		sprintf("Unable to load %s: %s\nExiting...\n",modfile,factory[count]->LastError());
+		Exit(ERROR);
+	}
+	if (factory[count]->factory)
+	{
+		modules[count] = factory[count]->factory->CreateModule();
+		/* save the module and the module's classfactory, if
+		 * this isnt done, random crashes can occur :/ */
+	}
+	else
+	{
+		debug("Unable to load %s",modfile);
+		sprintf("Unable to load %s\nExiting...\n",modfile);
+		Exit(ERROR);
+	}
+  }
+  MODCOUNT = count - 1;
+  debug("Total loaded modules: %d",MODCOUNT+1);
+
+  printf("\nInspIRCd is now running!\n");
+
+  startup_time = time(NULL);
+  
   if (DaemonSeed() == ERROR)
   {
      debug("InspIRCd: startup: can't daemonise");
@@ -2667,8 +3270,7 @@ int InspIRCd(void)
 	  debug("InspIRCd: startup: bad fd %d",openSockfd[boundPortCount]);
 	  return(ERROR);
       }
-
-      if (BindSocket(openSockfd[boundPortCount],client,server,ports[count]) == ERROR)
+      if (BindSocket(openSockfd[boundPortCount],client,server,ports[count],addrs[count]) == ERROR)
       {
 	  debug("InspIRCd: startup: failed to bind port %d",ports[count]);
       }
@@ -2699,70 +3301,75 @@ int InspIRCd(void)
       }
       /* added timeout! select was waiting forever... wank... :/ */
       tv.tv_sec = 0;
-      tv.tv_usec = 5;
+      tv.tv_usec = 1;
       selectResult = select(MAXSOCKS, &selectFds, NULL, NULL, &tv);
 
-	for (count2 = 0; count2<MAXCLIENTS; count2++)
+  	for (user_hash::iterator count2 = clientlist.begin(); count2 != clientlist.end(); count2++)
 	{
 		char data[MAXBUF];
-		if ((clientlist[count2].fd))
+
+		if (!count2->second) break;
+		
+		if (count2->second)
+		if ((count2->second->fd))
 		{
-			if (((time(NULL))>clientlist[count2].nping) && (strcmp(clientlist[count2].nick,"")) && (clientlist[count2].registered == 7))
+			if (((time(NULL)) > count2->second->nping) && (isnick(count2->second->nick)) && (count2->second->registered == 7))
 			{
-				if (!clientlist[count2].lastping) 
+				if (!count2->second->lastping) 
 				{
-				  	debug("InspIRCd: ping timeout: %s",clientlist[count2].nick);
-					kill_link(&clientlist[count2],"Ping timeout");
+				  	debug("InspIRCd: ping timeout: %s",count2->second->nick);
+					kill_link(count2->second,"Ping timeout");
+					break;
 				}
-				Write(clientlist[count2].fd,"PING :%s",ServerName);
-			  	debug("InspIRCd: pinging: %s",clientlist[count2].nick);
-				clientlist[count2].lastping = 0;
-				clientlist[count2].nping = time(NULL)+120;
+				Write(count2->second->fd,"PING :%s",ServerName);
+			  	debug("InspIRCd: pinging: %s",count2->second->nick);
+				count2->second->lastping = 0;
+				count2->second->nping = time(NULL)+120;
 			}
 			
-			
-			result = read(clientlist[count2].fd, data, 1);
+			result = read(count2->second->fd, data, 1);
 			// result == 0 means nothing read
 			if (result == EAGAIN)
 			{
 			}
 			if (result == ENOTSOCK)
 			{
-			  	debug("InspIRCd: dead socket: %s",clientlist[count2].nick);
-				kill_link(&clientlist[count2],"Dead socket");
+			  	debug("InspIRCd: dead socket: %s",count2->second->nick);
+				kill_link(count2->second,"Dead socket");
 			}
 			if (result == ENETUNREACH)
 			{
-			  	debug("InspIRCd: network unreachable: %s",clientlist[count2].nick);
-				kill_link(&clientlist[count2],"Network unreachable");
+			  	debug("InspIRCd: network unreachable: %s",count2->second->nick);
+				kill_link(count2->second,"Network unreachable");
 			}
 			if (result == ETIMEDOUT)
 			{
-			  	debug("InspIRCd: connection timed out: %s",clientlist[count2].nick);
-				kill_link(&clientlist[count2],"Connection timed out");
+			  	debug("InspIRCd: connection timed out: %s",count2->second->nick);
+				kill_link(count2->second,"Connection timed out");
 			}
 			if (result == ECONNRESET)
 			{
-			  	debug("InspIRCd: connection reset: %s",clientlist[count2].nick);
-				kill_link(&clientlist[count2],"Connection reset by peer");
+			  	debug("InspIRCd: connection reset: %s",count2->second->nick);
+				kill_link(count2->second,"Connection reset by peer");
 			}
 			else if (result < -1)
 			{
 			}
 			else if (result > 0)
 			{
-				if ((data) && (clientlist[count2].inbuf) && (clientlist[count2].fd))
+				if ((data) && (count2->second->inbuf) && (count2->second->fd) && (count2->second))
 				{
-					strncat(clientlist[count2].inbuf, data, result);
-					if (strstr(clientlist[count2].inbuf, "\n") || strstr(clientlist[count2].inbuf, "\r"))
+					strncat(count2->second->inbuf, data, result);
+					if (strstr(count2->second->inbuf, "\n") || strstr(count2->second->inbuf, "\r"))
 					{
 						/* at least one complete line is waiting to be processed */
-						if (clientlist[count2].fd)
+						if (count2->second->fd == 0)
 						{
-							process_buffer(&clientlist[count2]);
+							break;
 						}
-						if (clientlist[count2].fd == 0)
+						if (count2->second->fd)
 						{
+							process_buffer(count2->second);
 							break;
 						}
 					}
@@ -2770,7 +3377,7 @@ int InspIRCd(void)
 			}
 		}
 	}
-      
+
       /* something blew up */
       if (selectResult < 0)
       {

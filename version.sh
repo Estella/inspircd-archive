@@ -1,2 +1,2 @@
-#!/bin/bash
-echo "InspIRCd-1.0[Alpha3]"
+#!sh
+echo "InspIRCd-1.0[Alpha7]"

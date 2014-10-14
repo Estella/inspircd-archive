@@ -1,41 +1,13 @@
+#ifndef __WORLD_H
+#define __WORLD_H
+
+// include the common header files
+
+#undef __CHANNELS_H__
+#undef __USERS_H__
+#include <typeinfo>
+#include <iostream.h>
 #include <string>
-#include <stdio.h>
-#include <syslog.h>
-#include <stdlib.h>
-#include <unistd.h>
-#include <signal.h>
-#include <time.h>
-#include <netdb.h>
-#include <string.h>
-#include <ctype.h>
-#include <errno.h>
-#include <stdarg.h>
-#include <assert.h>
-#include <sys/param.h>
-#include <sys/types.h>
-#ifndef _LINUX_C_LIB_VERSION
-#include <sys/socket.h>
-#include <sys/stat.h>
-#include <netinet/in.h>
-#endif
-#include <arpa/inet.h>
-
-#include "inspircd_config.h"
-#include "inspircd_io.h"
-#include "inspircd_util.h"
-#define ERROR -1
-#define TRUE 1
-#define FALSE 0
-/* max sockets we can open */
-#define MAXSOCKS 64
-
-/* prototypes */
-int InspIRCd(void);
-int InitConfig(void);
-void Error(int status);
-void send_error(char *s);
-void ReadConfig(void);
-void strlower(char *n);
 
 extern "C" void WriteOpers(char* text, ...);
 extern "C" void debug(char *text, ...);
@@ -54,3 +26,4 @@ extern "C" struct userrec* Find(string nick);
 extern "C" struct chanrec* FindChan(char* chan);
 extern "C" char* cmode(struct userrec *user, struct chanrec *chan);
 
+#endif

@@ -1,17 +1,20 @@
 PROGS     = inspircd
+OBJS = inspircd.o inspircd_io.o inspircd_util.o modules.o dynamic.o
 
-INSTDIR   = $(prefix)/bin/
-INSTMODE  = 0755
-INSTOWNER = root
-INSTGROUP = root
+CC = g++
+CXXFLAGS = -fPIC -frtti -O
+LDLIBS = -ldl
 
-OBJS = inspircd.o inspircd_io.o inspircd_util.o
-
-all: $(PROGS)
+all : $(PROGS) m_foobar.so
 
 $(PROGS): $(OBJS)
-	$(CC) -o $@ $(OBJS)
+	$(CXX) -rdynamic $^ -o $@ $(LDLIBS)
+
+
+m_foobar.so : m_foobar.o
+	$(CXX) $(CXXFLAGS) -shared  $^ -o $@ && mv $@ `cat .modpath`
 
 .PHONY: clean
 clean:
 	rm -f *.o core
+

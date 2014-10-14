@@ -1,4 +1,5 @@
 #include "inspircd_config.h"
+#include <time.h>
 
 #ifndef __CHANNELS_H__
 #define __CHANNELS_H__

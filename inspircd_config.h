@@ -2,12 +2,13 @@
 
 #define SYSLOG_FACILITY LOG_DAEMON
 #define SYSLOG_LEVEL LOG_NOTICE
-#define CONFIG_FILE "/home/brain/inspircd/conf/inspircd.conf"
-#define MOD_PATH "/home/brain/inspircd/modules"
-#define VERSION "InspIRCd-1.0[Alpha1]"
-#define MAXCLIENTS 64
+#define CONFIG_FILE "/home/brain/inspircd-cvs/inspircd/conf/inspircd.conf"
+#define MOD_PATH "/home/brain/inspircd-cvs/inspircd/modules"
+#define VERSION "InspIRCd-1.0[Alpha6]"
+#define MAXCLIENTS 1024
 #define NICKMAX 32
 #define CHANMAX 64
 #define MAXCHANS 20
-#define MAXCHAN 64
 #define MAXMODES 256
+#define SYSTEM "Linux NEURON 2.4.7-10"
+#define MAXBUF 10240

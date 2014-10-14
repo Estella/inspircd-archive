@@ -25,9 +25,14 @@ struct userrec {
 	time_t nping;	       /* ping timeout timer */
 	int registered;        /* true if client has registered USER and NICK */
 	struct ucrec chans[MAXCHANS]; /* pointers to channels user is on plus ucmodes */
-	char server[256];
-	char awaymsg[MAXBUF];
-	int port;
+	char server[256];	/* server the user is connected to */
+	char awaymsg[512];
+	int port;		/* port the user is connected on, for reference only */
+	int inuse;
+	long bytes_in;		/* used by the '/stats L' command */
+	long bytes_out;		/* used by the '/stats L' command */
+	long cmds_in;		/* used by the '/stats L' command */
+	long cmds_out;		/* used by the '/stats L' command */
 };
 
 
